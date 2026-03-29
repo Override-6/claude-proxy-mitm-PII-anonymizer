@@ -28,18 +28,44 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import platform
+
 import easyocr
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-# Give PyTorch (used by both EasyOCR and GLiNER) access to all CPU cores.
+
+def _is_limited_arm() -> bool:
+    """Return True on ARMv8.0 CPUs (e.g. Raspberry Pi 4 Cortex-A72) that lack
+    the dot-product extension (asimddp). These CPUs crash with SIGILL when PyTorch
+    runs multi-threaded NEON kernels (torch.bmm, DeBERTa attention, etc.).
+    Returns False on x86, CUDA-capable machines, or modern ARM with asimddp."""
+    if platform.machine() not in ("aarch64", "arm64"):
+        return False
+    try:
+        with open("/proc/cpuinfo") as f:
+            return "asimddp" not in f.read()
+    except OSError:
+        return False
+
+
 _n_cpu = os.cpu_count() or 1
-torch.set_num_threads(_n_cpu)
-try:
-    torch.set_num_interop_threads(_n_cpu)
-except RuntimeError:
-    pass  # already set by another module
+if _is_limited_arm():
+    # ARMv8.0 baseline: force single-threaded inference to prevent SIGILL
+    # from optimized multi-threaded NEON kernels unsupported on this CPU.
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+else:
+    # Modern CPU (x86, CUDA, ARMv8.2+): use all cores for best performance.
+    torch.set_num_threads(_n_cpu)
+    try:
+        torch.set_num_interop_threads(_n_cpu)
+    except RuntimeError:
+        pass
 
 from entity_finder import Entity
 from entity_finder.regex_finder import RegexEntityFinder

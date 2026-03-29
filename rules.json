@@ -3,6 +3,10 @@
     {
       "_comment": "claude.ai — MCP tool calls (must use local MCP servers instead)",
       "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/mcp/servers/[^/]+/tools/call"
+    },
+    {
+      "_comment": "claude.ai — remote integrations bridge (server-side tool execution, e.g. Gmail, Google Drive)",
+      "url_pattern": "https://bridge\\.claudeusercontent\\.com/.*"
     }
   ],
 
@@ -12,15 +16,10 @@
       "_comment": "Messages API — create & count_tokens (api + a-api, v1)",
       "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/messages(/count_tokens)?",
       "sensitive_fields": [
-        ".system",
-        ".system[].text",
         ".messages[].content",
         ".messages[].content[].text",
-        ".messages[].content[].source.data",
-        ".messages[].content[].source.url",
         ".messages[].content[].title",
         ".messages[].content[].context",
-        ".messages[].content[].input",
         ".messages[].content[].content",
         ".metadata.user_id",
         ".tools[].user_location"
@@ -32,15 +31,10 @@
       "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/messages/batches",
       "sensitive_fields": [
         ".requests[].custom_id",
-        ".requests[].params.system",
-        ".requests[].params.system[].text",
         ".requests[].params.messages[].content",
         ".requests[].params.messages[].content[].text",
-        ".requests[].params.messages[].content[].source.data",
-        ".requests[].params.messages[].content[].source.url",
         ".requests[].params.messages[].content[].title",
         ".requests[].params.messages[].content[].context",
-        ".requests[].params.messages[].content[].input",
         ".requests[].params.messages[].content[].content",
         ".requests[].params.metadata.user_id"
       ]

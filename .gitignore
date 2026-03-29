@@ -2,4 +2,5 @@
 .idea
 ignore
 cache/
-
+data/
+**/__pycache__

@@ -48,18 +48,18 @@ def inject(body: dict, url: str) -> dict:
 
     # Already injected — don't duplicate (Claude Desktop resends the full
     # conversation on every turn, so this request may have been processed before)
-    if isinstance(existing, str) and existing.startswith(our_prompt):
+    if isinstance(existing, str) and existing.endswith(our_prompt):
         return body
     if isinstance(existing, list) and existing and \
-            existing[0].get("type") == "text" and existing[0].get("text") == our_prompt:
+            existing[-1].get("type") == "text" and existing[-1].get("text") == our_prompt:
         return body
 
     if not existing:
         new_system = our_prompt
     elif isinstance(existing, str):
-        new_system = our_prompt + "\n\n" + existing
+        new_system = existing + "\n\n" + our_prompt
     elif isinstance(existing, list):
-        new_system = [{"type": "text", "text": our_prompt}] + existing
+        new_system = existing + [{"type": "text", "text": our_prompt}]
     else:
         return body
 

@@ -311,8 +311,18 @@ async def _apply_rule_json(request: Request, rule: RequestRule, url: str = ""):
     if state["system_prompt_enabled"]:
         body = claude_system_prompt.inject(body, url)
     new_content = json.dumps(body, ensure_ascii=False)
+    import re as _re
     if new_content != original:
-        print(f"[anonymizer] Body modified (original length {len(original)} → {len(new_content)})")
+        orig_tokens = set(_re.findall(r'\[[A-Z_]+_\d+\]', original))
+        new_tokens = set(_re.findall(r'\[[A-Z_]+_\d+\]', new_content))
+        injected = new_tokens - orig_tokens
+        if injected:
+            print(f"[anonymizer] Tokens introduced: {injected}")
+            for tok in list(injected)[:10]:
+                idx = new_content.find(tok)
+                print(f"[anonymizer] '{tok}' context: ...{new_content[max(0,idx-80):idx+len(tok)+80]}...")
+        else:
+            print(f"[anonymizer] Body changed (system prompt injected, no new tokens)")
     else:
         print(f"[anonymizer] WARNING: body unchanged after anonymization ({len(original)} chars)")
     request.set_content(new_content.encode("utf-8"))

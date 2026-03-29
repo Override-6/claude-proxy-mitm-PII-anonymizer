@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import json
 
@@ -41,12 +42,18 @@ class JSONListenerProtocol(asyncio.DatagramProtocol):
         except json.JSONDecodeError:
             print(f"[WARN] Non-JSON packet from {addr}: {data[:200]}")
 
-async def main():
+async def main(host: str, port: int):
     loop = asyncio.get_event_loop()
     await loop.create_datagram_endpoint(
         JSONListenerProtocol,
-        local_addr=("0.0.0.0", 8080)
+        local_addr=(host, port)
     )
+    print(f"[viewer] Listening on {host}:{port}")
     await asyncio.sleep(9999)
 
-asyncio.run(main())
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Claude MITM proxy event viewer")
+    parser.add_argument("--host", default="0.0.0.0", help="Listen host (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8080, help="Listen port (default: 8080)")
+    args = parser.parse_args()
+    asyncio.run(main(args.host, args.port))

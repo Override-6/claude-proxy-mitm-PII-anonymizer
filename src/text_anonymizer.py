@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from functools import lru_cache
 from typing import List
 
 from entity_finder import Entity
@@ -17,6 +16,14 @@ from event_socket import get_event_socket
 from mappings import Mappings
 
 log = logging.getLogger(__name__)
+
+# Limit concurrent GLiNER inference to 1.
+# On Raspberry Pi 4 (ARMv8.0, 3.7 GB RAM) running GLiNER simultaneously in
+# multiple asyncio.to_thread calls causes OOM kills and SIGILL crashes.
+# The semaphore is only acquired on a cache miss — cache hits skip it entirely
+# so large conversation histories (many repeated blocks) don't queue needlessly.
+_gliner_sem = asyncio.Semaphore(1)
+_entity_cache: dict[str, tuple[Entity, ...]] = {}
 
 EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 PHONE_REGEX = re.compile(
@@ -43,8 +50,6 @@ _regex_finder = RegexEntityFinder([
     (PHONE_REGEX, "PHONE"),
 ])
 _ner_finder = NEREntityFinder()
-
-finders = [_regex_finder, _ner_finder]
 
 REDACTED_REGEX = re.compile(r'\[[A-Z_]+_[0-9]+]')
 _EXEMPT_RE = re.compile(r'\{\{(.*?)\}\}', re.DOTALL)
@@ -78,29 +83,30 @@ def _strip_exempt_markers(text: str) -> tuple[str, list[tuple[int, int]]]:
     return "".join(parts), exempt_spans
 
 
-@lru_cache(maxsize=2048)
-def _detect_entities_cached(text: str) -> tuple[Entity, ...]:
-    """Cached wrapper around entity detection.
+def _run_entity_detection(text: str) -> tuple[Entity, ...]:
+    """Run all finders on *text* and return deduplicated entities.
 
-    Finders are applied in priority order (regex first, NER second).
-    Entities from later finders are dropped when they overlap with an entity
-    already accepted by an earlier finder — prevents NER from detecting the
-    local-part of an email address as a PERSON, for example.
-
-    Claude Desktop resends the full conversation history with every turn, so
-    most text blocks are identical across requests. The LRU cache makes those
-    repeat calls instant without re-running NER.
+    Finders run in priority order; later-finder entities overlapping an
+    already-accepted span are discarded (prevents NER from grabbing email
+    local-parts as PERSON, etc.).
     """
-    accepted: list[Entity] = []
-    for finder in finders:
-        for entity in finder.find_entities(text):
-            if not any(entity.start < a.end and entity.end > a.start for a in accepted):
-                accepted.append(entity)
+    regex_entities = _regex_finder.find_entities(text)
+
+    if not text.strip():
+        return tuple(regex_entities)
+
+    accepted: list[Entity] = list(regex_entities)
+    for entity in _ner_finder.find_entities(text):
+        if not any(entity.start < a.end and entity.end > a.start for a in accepted):
+            accepted.append(entity)
     return tuple(accepted)
 
 
 def detect_entities(text: str) -> List[Entity]:
-    return list(_detect_entities_cached(text))
+    if text not in _entity_cache:
+        _entity_cache[text] = _run_entity_detection(text)
+    return list(_entity_cache[text])
+
 
 
 def detect_entities_batch(texts: List[str]) -> List[List[Entity]]:
@@ -130,8 +136,15 @@ def detect_entities_batch(texts: List[str]) -> List[List[Entity]]:
 async def anonymize_text(text: str, mappings: Mappings) -> str:
     clean_text, exempt_spans = _strip_exempt_markers(text)
 
-    # Run entity detection in a thread so spaCy doesn't block the event loop
-    entities = await asyncio.to_thread(_detect_entities_cached, clean_text)
+    # Cache hit: return instantly, no semaphore needed.
+    # Cache miss: serialize GLiNER inference — prevents concurrent PyTorch calls
+    # that cause OOM / SIGILL on Raspberry Pi 4 (ARMv8.0, 3.7 GB RAM).
+    if clean_text in _entity_cache:
+        entities = _entity_cache[clean_text]
+    else:
+        async with _gliner_sem:
+            entities = await asyncio.to_thread(_run_entity_detection, clean_text)
+            _entity_cache[clean_text] = entities
 
     # Drop entities that overlap (even partially) with an {{...}} marker
     active = [

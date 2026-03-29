@@ -1,0 +1,26 @@
+services:
+  mitm-proxy:
+    build: .
+    image: claude-mitm-proxy:latest
+    container_name: claude-mitm-proxy
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "127.0.0.1:9999:9999"
+    volumes:
+      # Persists mitmproxy CA cert across restarts.
+      # The cert at ./data/mitmproxy-ca-cert.pem must be installed on every
+      # client machine that routes traffic through this proxy.
+      - ./data/mitmproxy:/root/.mitmproxy
+      # Runtime config — edit without rebuilding
+      - ./rules.json:/app/rules.json:ro
+      - ./SYSTEM_PROMPT.md:/app/SYSTEM_PROMPT.md:ro
+      # Persistent cache and audit log
+      - ./data/cache:/app/cache
+      - ./data/ignore:/app/ignore
+      # HuggingFace model cache — persists GLiNER/EasyOCR weights across image rebuilds
+      - ./data/hf_cache:/root/.cache/huggingface
+      # Mount source code so code changes take effect without rebuilding the image
+      - ./src:/app/src
+    environment:
+      - PYTHONUNBUFFERED=1

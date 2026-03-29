@@ -14,30 +14,33 @@ Commands:
   quit / exit              Leave the console
 """
 
+import argparse
 import json
 import socket
 import sys
 
-PROXY_HOST = "127.0.0.1"
-PROXY_PORT = 9999
-TIMEOUT    = 3.0  # seconds
+TIMEOUT = 3.0  # seconds
 
 HELP = __doc__
 
 
-def send(cmd: str) -> dict:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+def send(cmd: str, host: str, port: int) -> dict:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(TIMEOUT)
-        sock.sendto(cmd.encode("utf-8"), (PROXY_HOST, PROXY_PORT))
-        data, _ = sock.recvfrom(65535)
-    return json.loads(data.decode("utf-8"))
+        sock.connect((host, port))
+        sock.sendall(cmd.encode("utf-8"))
+        sock.shutdown(socket.SHUT_WR)
+        chunks = []
+        while chunk := sock.recv(4096):
+            chunks.append(chunk)
+    return json.loads(b"".join(chunks).decode("utf-8"))
 
 
 def fmt_bool(value: bool) -> str:
     return "\033[32mON\033[0m" if value else "\033[31mOFF\033[0m"
 
 
-def handle(cmd: str):
+def handle(cmd: str, host: str, port: int):
     cmd = cmd.strip()
 
     if not cmd or cmd.startswith("#"):
@@ -57,7 +60,7 @@ def handle(cmd: str):
                "system prompt on", "system prompt off",
                "status", "dump", "clear"):
         try:
-            resp = send(cmd)
+            resp = send(cmd, host, port)
         except TimeoutError:
             print("[error] no response from proxy — is it running?")
             return
@@ -105,12 +108,17 @@ def handle(cmd: str):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Claude MITM proxy console")
+    parser.add_argument("--host", default="127.0.0.1", help="Proxy control host (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=9999, help="Proxy control port (default: 9999)")
+    args = parser.parse_args()
+
     print("Claude MITM proxy console  (type 'help' for commands)")
-    print(f"Connecting to proxy at {PROXY_HOST}:{PROXY_PORT}\n")
+    print(f"Connecting to proxy at {args.host}:{args.port}\n")
 
     # Show initial status
     try:
-        resp = send("status")
+        resp = send("status", args.host, args.port)
         print(f"  anon           {fmt_bool(resp['anon_enabled'])}")
         print(f"  deanon         {fmt_bool(resp['deanon_enabled'])}")
         print(f"  save images    {fmt_bool(resp.get('save_images', False))}")
@@ -125,7 +133,7 @@ def main():
         except (EOFError, KeyboardInterrupt):
             print()
             break
-        handle(line)
+        handle(line, args.host, args.port)
 
 
 if __name__ == "__main__":
