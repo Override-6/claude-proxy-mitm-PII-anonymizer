@@ -12,6 +12,7 @@ from mitmproxy import http
 from control_socket import init_control_socket
 from event_socket import get_event_socket, init_event_socket
 from rule_applier import apply_request_rules, apply_response_rules, make_deanon_chunk, rules, state
+from text_anonymizer import start_cache_prune_task
 
 
 # ---------------------------------------------------------------------------
@@ -21,6 +22,7 @@ from rule_applier import apply_request_rules, apply_response_rules, make_deanon_
 async def running():
     await init_event_socket()
     await init_control_socket(state)
+    start_cache_prune_task()
 
 
 async def request(flow: http.HTTPFlow):

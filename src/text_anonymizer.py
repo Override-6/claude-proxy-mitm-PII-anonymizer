@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
 from typing import List
 
 from entity_finder import Entity
@@ -24,6 +25,7 @@ log = logging.getLogger(__name__)
 # so large conversation histories (many repeated blocks) don't queue needlessly.
 _gliner_sem = asyncio.Semaphore(1)
 _entity_cache: dict[str, tuple[Entity, ...]] = {}
+_entity_cache_hits: dict[str, int] = {}
 
 EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 PHONE_REGEX = re.compile(
@@ -102,6 +104,41 @@ def _run_entity_detection(text: str) -> tuple[Entity, ...]:
     return tuple(accepted)
 
 
+def _prune_entity_cache():
+    """Remove cache entries hit fewer than 3 times since the last prune."""
+    cold = [key for key, hits in _entity_cache_hits.items() if hits < 3]
+    for key in cold:
+        _entity_cache.pop(key, None)
+        _entity_cache_hits.pop(key, None)
+    if cold:
+        log.info("[cache] Pruned %d cold entries (< 3 hits). %d remain.", len(cold), len(_entity_cache))
+    else:
+        log.info("[cache] Prune run: all %d entries are warm.", len(_entity_cache))
+    # Reset counters for the next period
+    for key in _entity_cache_hits:
+        _entity_cache_hits[key] = 0
+
+
+async def _cache_prune_loop():
+    """Run _prune_entity_cache every 12 h, aligned to 00:00 or 12:00 UTC."""
+    while True:
+        now = datetime.now(timezone.utc)
+        # Next boundary: either midnight or noon, whichever comes first
+        next_hour = 12 if now.hour < 12 else 24  # 24 → wraps to 00:00 next day
+        seconds_until = (
+            (next_hour - now.hour) * 3600
+            - now.minute * 60
+            - now.second
+        )
+        await asyncio.sleep(seconds_until)
+        _prune_entity_cache()
+
+
+def start_cache_prune_task():
+    """Schedule the cache pruning loop. Call once after the event loop starts."""
+    asyncio.get_event_loop().create_task(_cache_prune_loop())
+
+
 def detect_entities(text: str) -> List[Entity]:
     if text not in _entity_cache:
         _entity_cache[text] = _run_entity_detection(text)
@@ -140,11 +177,13 @@ async def anonymize_text(text: str, mappings: Mappings) -> str:
     # Cache miss: serialize GLiNER inference — prevents concurrent PyTorch calls
     # that cause OOM / SIGILL on Raspberry Pi 4 (ARMv8.0, 3.7 GB RAM).
     if clean_text in _entity_cache:
+        _entity_cache_hits[clean_text] = _entity_cache_hits.get(clean_text, 0) + 1
         entities = _entity_cache[clean_text]
     else:
         async with _gliner_sem:
             entities = await asyncio.to_thread(_run_entity_detection, clean_text)
             _entity_cache[clean_text] = entities
+            _entity_cache_hits[clean_text] = 0
 
     # Drop entities that overlap (even partially) with an {{...}} marker
     active = [
