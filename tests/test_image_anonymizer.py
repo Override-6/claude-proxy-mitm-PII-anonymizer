@@ -25,7 +25,7 @@ from src.mappings import Mappings
 import src.image_anonymizer as image_anonymizer
 
 # Shared reader for verification OCR (avoid reloading the model)
-_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+_reader = easyocr.Reader(["en", "fr"], gpu=False, verbose=False)
 
 
 # ---------------------------------------------------------------------------

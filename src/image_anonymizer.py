@@ -69,7 +69,6 @@ else:
 
 from entity_finder import Entity
 from entity_finder.regex_finder import RegexEntityFinder
-from event_socket import get_event_socket
 from mappings import Mappings
 from text_anonymizer import detect_entities, detect_entities_batch
 
@@ -178,20 +177,20 @@ def _restore_cache(data: dict):
     return merged, entities_per_line
 
 
-def _detect_entities_ocr(text: str) -> List[Entity]:
+def _detect_entities_ocr(text: str, mappings: Mappings) -> List[Entity]:
     """Run both standard and OCR-lax finders, deduplicating by span."""
-    return _merge_ocr_entities(detect_entities(text), _ocr_lax_finder.find_entities(text))
+    return _merge_ocr_entities(detect_entities(text, mappings), _ocr_lax_finder.find_entities(text, mappings))
 
 
-def _detect_entities_ocr_batch(texts: List[str]) -> List[List[Entity]]:
+def _detect_entities_ocr_batch(texts: List[str], mappings: Mappings) -> List[List[Entity]]:
     """Batch version: runs standard+lax finders across all texts in one pass.
 
     NER is batched via nlp.pipe() — a single model forward pass instead of
     one per OCR line, which is the main OCR performance bottleneck.
     """
-    standard_batch = detect_entities_batch(texts)
+    standard_batch = detect_entities_batch(texts, mappings)
     return [
-        _merge_ocr_entities(standard, _ocr_lax_finder.find_entities(text))
+        _merge_ocr_entities(standard, _ocr_lax_finder.find_entities(text, mappings))
         for standard, text in zip(standard_batch, texts)
     ]
 
@@ -237,7 +236,7 @@ def _get_reader() -> easyocr.Reader:
     global _reader
     if _reader is None:
         log.info("Loading EasyOCR reader (first call)…")
-        _reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+        _reader = easyocr.Reader(["en", "fr"], gpu=False, verbose=False)
         log.info("EasyOCR reader ready.")
     return _reader
 
@@ -452,7 +451,7 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 
 def _fit_font(draw: ImageDraw.ImageDraw, text: str,
               box_w: int, box_h: int, initial_size: int
-              ) -> Tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, int, int]:
+              ) -> Tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, float, float]:
     """
     Return the largest font (and text pixel dimensions) where *text* fits
     entirely inside a box of *box_w* × *box_h* pixels.
@@ -500,7 +499,7 @@ def anonymize_image(image_bytes: bytes, mappings: Mappings) -> Tuple[bytes, str]
         lines = _group_into_lines(raw_regions)
         merged = [_merge_line(line) for line in lines]
         line_texts = [text for text, _ in merged]
-        entities_per_line = _detect_entities_ocr_batch(line_texts)
+        entities_per_line = _detect_entities_ocr_batch(line_texts, mappings)
         _save_cache(h, merged, entities_per_line)
 
     if not merged or not any(entities_per_line):
@@ -525,7 +524,7 @@ def anonymize_image(image_bytes: bytes, mappings: Mappings) -> Tuple[bytes, str]
             if not matched:
                 continue
 
-            redacted = mappings.get_redacted_text(entity.text, entity.type)
+            redacted = mappings.get_or_set_redacted_text(entity.text, entity.type)
             left, top, right, bottom = _precise_bbox(matched, entity.start, entity.end)
             left, top, right, bottom = _extend_for_tld(entity, line_regions, entity.end,
                                                         (left, top, right, bottom))
@@ -545,10 +544,6 @@ def anonymize_image(image_bytes: bytes, mappings: Mappings) -> Tuple[bytes, str]
 
     if not any_redacted:
         return image_bytes, ocr_text
-
-    socket = get_event_socket()
-    if socket is not None:
-        socket.broadcast({"type": "anonymize_image", "entities": redacted_entities})
 
     buf = io.BytesIO()
     image.save(buf, format="PNG")

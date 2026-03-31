@@ -4,6 +4,9 @@ Communicates with the proxy via UDP on 127.0.0.1:9999.
 
 Commands:
   anon on/off              Enable / disable request anonymization
+  anxious on/off           Enable / disable anxious filter.
+                           Special filter that will check ALL requests of domains registered in the 'anxious_watchlist'
+                           ruleset and that will ensure that no sensitive data registered in mappings is present in the requests.
   deanon on/off            Enable / disable response deanonymization
   save images on/off       Save redacted images to ignore/redacted_images/
   system prompt on/off     Enable / disable SYSTEM_PROMPT.md injection
@@ -56,6 +59,7 @@ def handle(cmd: str, host: str, port: int):
 
     # Commands that map 1-to-1 to the socket protocol
     if cmd in ("anon on", "anon off", "deanon on", "deanon off",
+               "anxious on", "anxious off",
                "save images on", "save images off",
                "system prompt on", "system prompt off",
                "status", "dump", "clear"):
@@ -75,8 +79,10 @@ def handle(cmd: str, host: str, port: int):
         if cmd == "status":
             print(f"  anon           {fmt_bool(resp['anon_enabled'])}")
             print(f"  deanon         {fmt_bool(resp['deanon_enabled'])}")
+            print(f"  anxious        {fmt_bool(resp['anxious_enabled'])}")
             print(f"  save images    {fmt_bool(resp.get('save_images', False))}")
             print(f"  system prompt  {fmt_bool(resp.get('system_prompt_enabled', False))}")
+
 
         elif cmd == "dump":
             entities = resp.get("entities", [])
@@ -96,6 +102,9 @@ def handle(cmd: str, host: str, port: int):
 
         elif cmd.startswith("deanon"):
             print(f"  deanonymization {fmt_bool(resp['deanon_enabled'])}")
+
+        elif cmd.startswith('anxious'):
+            print(f"  anxious {fmt_bool(resp['anxious_enabled'])}")
 
         elif cmd.startswith("save images"):
             print(f"  save images {fmt_bool(resp['save_images'])}")
@@ -121,6 +130,7 @@ def main():
         resp = send("status", args.host, args.port)
         print(f"  anon           {fmt_bool(resp['anon_enabled'])}")
         print(f"  deanon         {fmt_bool(resp['deanon_enabled'])}")
+        print(f"  anxious         {fmt_bool(resp['anxious_enabled'])}")
         print(f"  save images    {fmt_bool(resp.get('save_images', False))}")
         print(f"  system prompt  {fmt_bool(resp.get('system_prompt_enabled', False))}")
         print()

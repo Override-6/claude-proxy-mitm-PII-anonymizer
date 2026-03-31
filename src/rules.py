@@ -6,8 +6,8 @@ from dataclasses import dataclass
 @dataclass
 class RequestRule:
     url_pattern: re.Pattern
-    sensitive_fields: list[list[str]] | bool
-    sse_fields: list[list[str]] | None = None
+    sensitive_fields: list[str] | bool
+    sse_fields: list[str] | None = None
 
 
 @dataclass
@@ -22,36 +22,15 @@ class ProxyRules:
     response_rules: list[RequestRule]
 
 
-def parse_jq_path(path: str) -> list[str]:
-    """Parse a jq-style path into segments.
-
-    '.messages[].content[].text' → ['messages', '[]', 'content', '[]', 'text']
-    """
-    segments = []
-    for part in path.lstrip(".").split("."):
-        if not part:
-            continue
-        if part.endswith("[]"):
-            segments.append(part[:-2])
-            segments.append("[]")
-        else:
-            segments.append(part)
-    return segments
-
-
-def _parse_fields(fields) -> list[list[str]] | bool:
-    return True if fields is True else [parse_jq_path(p) for p in fields]
-
-
 def _parse_rule_list(raw_rules: list[dict]) -> list[RequestRule]:
     result = []
     for rule in raw_rules:
+        fields = rule["sensitive_fields"]
         sse_raw = rule.get("sse_fields")
-        sse_parsed = [parse_jq_path(p) for p in sse_raw] if sse_raw else None
         result.append(RequestRule(
             re.compile(rule["url_pattern"]),
-            _parse_fields(rule["sensitive_fields"]),
-            sse_parsed,
+            True if fields is True else list(fields),
+            list(sse_raw) if sse_raw else None,
         ))
     return result
 

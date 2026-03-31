@@ -36,7 +36,7 @@ class JSONListenerProtocol(asyncio.DatagramProtocol):
 
             if line:
                 print(line)
-                with open("ignore/events.jsonl", "a", buffering=1) as f:
+                with open("data/ignore/events.jsonl", "a", buffering=1) as f:
                     f.write(line + "\n")
 
         except json.JSONDecodeError:

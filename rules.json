@@ -1,12 +1,32 @@
 {
+  "anxiety_watchlist": [
+    "(api|a-api)\\.anthropic\\.com",
+    "claude.ai"
+  ],
   "blocked_urls": [
     {
       "_comment": "claude.ai — MCP tool calls (must use local MCP servers instead)",
       "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/mcp/servers/[^/]+/tools/call"
     },
     {
+      "_comment": "claude.ai metrics",
+      "url_pattern": "https://api\\.anthropic\\.com/api/event_logging/.*"
+    },
+    {
+      "_comment": "claude.ai metrics",
+      "url_pattern": "https://statsig\\.anthropic\\.com/.*"
+    },
+    {
       "_comment": "claude.ai — remote integrations bridge (server-side tool execution, e.g. Gmail, Google Drive)",
       "url_pattern": "https://bridge\\.claudeusercontent\\.com/.*"
+    },
+    {
+      "_comment": "datadog metrics",
+      "url_pattern": "https://.*\\.datadoghq\\.com/.*"
+    },
+    {
+      "_comment": "sentry (error loggings and telemetry management)",
+      "url_pattern": "https://sentry\\.io/.*"
     }
   ],
 
@@ -16,12 +36,11 @@
       "_comment": "Messages API — create & count_tokens (api + a-api, v1)",
       "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/messages(/count_tokens)?",
       "sensitive_fields": [
-        ".messages[].content",
+        ".system[1:][].text",
         ".messages[].content[].text",
         ".messages[].content[].title",
         ".messages[].content[].context",
         ".messages[].content[].content",
-        ".metadata.user_id",
         ".tools[].user_location"
       ]
     },
@@ -30,13 +49,13 @@
       "_comment": "Messages Batches API (api + a-api, v1)",
       "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/messages/batches",
       "sensitive_fields": [
+        ".system[1:][].text",
         ".requests[].custom_id",
         ".requests[].params.messages[].content",
         ".requests[].params.messages[].content[].text",
         ".requests[].params.messages[].content[].title",
         ".requests[].params.messages[].content[].context",
-        ".requests[].params.messages[].content[].content",
-        ".requests[].params.metadata.user_id"
+        ".requests[].params.messages[].content[].content"
       ]
     },
 
@@ -44,8 +63,8 @@
       "_comment": "Legacy Completions API (api + a-api, v1)",
       "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/complete",
       "sensitive_fields": [
-        ".prompt",
-        ".metadata.user_id"
+        ".system[1:][].text",
+        ".prompt"
       ]
     },
 
@@ -93,6 +112,7 @@
       "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/chat_conversations/[^/]+/(completion|retry_completion|continue|retry)",
       "sensitive_fields": [
         ".prompt",
+        ".system[1:][].text",
         ".attachments[].extracted_content",
         ".attachments[].file_name"
       ]
@@ -134,6 +154,7 @@
       "url_pattern": "https://claude\\.ai/api/append_message",
       "sensitive_fields": [
         ".text",
+        ".system[1:][].text",
         ".attachments[].extracted_content",
         ".attachments[].file_name",
         ".completion.prompt"

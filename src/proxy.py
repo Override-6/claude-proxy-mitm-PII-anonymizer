@@ -5,12 +5,12 @@ MITM Proxy for intercepting Claude Desktop traffic.
 - Streams responses through without buffering (no slowdown)
 - Logs anonymized traffic to JSONL
 """
-import time
+import os
 
 from mitmproxy import http
 
 from control_socket import init_control_socket
-from event_socket import get_event_socket, init_event_socket
+from entity_finder.mappings_finder import MappingsEntityFinder
 from rule_applier import apply_request_rules, apply_response_rules, make_deanon_chunk, rules, state
 from text_anonymizer import start_cache_prune_task
 
@@ -20,7 +20,6 @@ from text_anonymizer import start_cache_prune_task
 # ---------------------------------------------------------------------------
 
 async def running():
-    await init_event_socket()
     await init_control_socket(state)
     start_cache_prune_task()
 
@@ -40,30 +39,31 @@ async def request(flow: http.HTTPFlow):
                 "Blocked by proxy: this endpoint is not allowed.",
                 {"Content-Type": "text/plain"},
             )
-            socket = get_event_socket()
-            socket.broadcast({"type": "blocked", "url": flow.request.pretty_url})
             return
 
-    t0 = time.time()
     # Anonymize before broadcasting so the viewer sees the redacted body.
-    anonymized = await apply_request_rules(flow, rules.request_rules)
-    t1 = time.time()
+    await apply_request_rules(flow, rules.request_rules)
 
-    socket = get_event_socket()
-    content = flow.request.get_content()
-    body = content.decode("utf-8", errors="ignore") if content else None
-
-    event: dict = {
-        "type": "request",
-        "url": flow.request.pretty_url,
-        "method": flow.request.method,
-        "body": body,
-    }
-    if anonymized:
-        event["process_time"] = t1 - t0
-        print("[anonymizer] Process time: " + str(t1 - t0) + " seconds")
-
-    socket.broadcast(event)
+    if state["anxious_enabled"]:
+        body = flow.request.get_content().decode("utf-8", errors="ignore")
+        entities = MappingsEntityFinder().find_entities(body, state["mappings"])
+        if entities:
+            print("[proxy] Anxious filter triggered !")
+            print(f"[proxy] Request {url} contained {len(entities)} unmasked sensible entities.")
+            print(f"[proxy] entities are ", set(e.text for e in entities))
+            print("[proxy] Dropping request and returning 403 instead.")
+            flow.response = http.Response.make(
+                403,
+                "Blocked by proxy: request contains unredacted sensible data.",
+                {"Content-Type": "text/plain"},
+            )
+            dump_path = "/app/ignore/last_anxious_filter.json"
+            os.makedirs("/app/ignore", exist_ok=True)
+            with open(dump_path, "w") as f:
+                f.write(flow.request.get_content().decode("utf-8"))
+            print(f"[proxy] Full request body saved to {dump_path}")
+            print("")
+            
 
 
 async def responseheaders(flow: http.HTTPFlow):
@@ -85,46 +85,23 @@ async def responseheaders(flow: http.HTTPFlow):
 
 async def response(flow: http.HTTPFlow):
     # Broadcast raw (still-anonymized) response to viewer
-    socket = get_event_socket()
     content = flow.response.get_content()
     body = content.decode("utf-8", errors="ignore") if content else None
 
     if flow.response.status_code >= 400:
-        import json as _json, os as _os
         req_content = flow.request.get_content()
         req_body = req_content.decode("utf-8", errors="ignore") if req_content else ""
         print(f"[proxy] {flow.response.status_code} from {flow.request.pretty_url}")
         print(f"[proxy] Response: {body}")
         try:
-            req_json = _json.loads(req_body)
-            print(f"[proxy] Request keys: {list(req_json.keys())}")
-            system = req_json.get("system")
-            if isinstance(system, list):
-                print(f"[proxy] system: {len(system)} blocks, types={[b.get('type') for b in system]}, has_cache_control={[bool(b.get('cache_control')) for b in system]}")
-            elif isinstance(system, str):
-                print(f"[proxy] system: string len={len(system)}")
-            msgs = req_json.get("messages", [])
-            print(f"[proxy] messages: {len(msgs)} messages")
-            for i, m in enumerate(msgs[-3:], len(msgs) - 3):
-                c = m.get("content")
-                if isinstance(c, list):
-                    print(f"[proxy] messages[{i}] role={m.get('role')} content_types={[b.get('type') for b in c]}")
-                else:
-                    print(f"[proxy] messages[{i}] role={m.get('role')} content=string len={len(c or '')}")
             # Save full body to file for inspection
             dump_path = "/app/ignore/last_400_body.json"
-            _os.makedirs("/app/ignore", exist_ok=True)
+            os.makedirs("/app/ignore", exist_ok=True)
             with open(dump_path, "w") as f:
                 f.write(req_body)
             print(f"[proxy] Full request body saved to {dump_path}")
         except Exception as e:
             print(f"[proxy] Could not parse request body: {e}")
-
-    socket.broadcast({
-        "type": "response",
-        "url": flow.response.status_code,
-        "body": body,
-    })
 
     # Deanonymize non-streaming responses before they reach the client
     apply_response_rules(flow, rules.response_rules)

@@ -19,4 +19,6 @@ if command -v netfilter-persistent &>/dev/null; then
   netfilter-persistent save
 fi
 
+systemctl --user stop claude-proxy-tunnel
+
 echo "==> Done — direct :443 traffic restored."

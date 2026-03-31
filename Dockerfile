@@ -11,13 +11,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Pip download cache persists across builds — torch/gliner/easyocr won't re-download
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
-# Pre-download GLiNER model so the first request isn't slow
-RUN python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_multi-v2.1')"
+# Pre-download GLiNER model — HuggingFace cache persists across builds
+RUN --mount=type=cache,target=/root/.cache/huggingface \
+    python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_multi-v2.1')"
 
-# Pre-download EasyOCR English model
-RUN python -c "import easyocr; easyocr.Reader(['en'], gpu=False)"
+# Pre-download EasyOCR English + French models — EasyOCR uses ~/.EasyOCR by default
+RUN --mount=type=cache,target=/root/.EasyOCR \
+    python -c "import easyocr; easyocr.Reader(['en', 'fr'], gpu=False)"
 
 COPY . .
 

@@ -12,29 +12,47 @@ import os
 import re
 import time
 
+import jq as _jq
+
 from mitmproxy import http
 from mitmproxy.http import Request
 
 import claude_system_prompt
 import image_anonymizer
 import text_anonymizer
-from event_socket import get_event_socket
 from mappings import Mappings
 from rules import load_rules, RequestRule
 
 mappings = Mappings()
 rules = load_rules()
 
-_IMAGES_DIR = os.path.join(os.path.dirname(__file__), "..", "ignore", "redacted_images")
+_IMAGES_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "redacted_images")
 
 # Mutable state shared with the control socket
 state = {
     "anon_enabled": True,
     "deanon_enabled": False,
-    "save_images": False,
+    "anxious_enabled": True,
+    "save_images": True,
     "system_prompt_enabled": True,
     "mappings": mappings,
 }
+
+
+def _log_anonymization_diff(original: str, new_content: str) -> None:
+    if new_content == original:
+        print(f"[anonymizer] WARNING: body unchanged after anonymization ({len(original)} chars)")
+        return
+    orig_tokens = set(re.findall(r'\[[A-Z_]+_\d+\]', original))
+    new_tokens = set(re.findall(r'\[[A-Z_]+_\d+\]', new_content))
+    injected = new_tokens - orig_tokens
+    if not injected:
+        print("[anonymizer] Body changed (system prompt injected, no new tokens)")
+        return
+    print(f"[anonymizer] Tokens introduced: {injected}")
+    for tok in list(injected)[:10]:
+        idx = new_content.find(tok)
+        print(f"[anonymizer] '{tok}' context: ...{new_content[max(0,idx-80):idx+len(tok)+80]}...")
 
 
 def _save_image(image_bytes: bytes, ocr_text: str, image_hash: str) -> None:
@@ -75,18 +93,37 @@ def _deanon_sse_targeted(text: str, sse_fields: list[list[str]]) -> str:
 
 
 def make_deanon_chunk(sse_fields: list[list[str]] | None):
-    """Return a stream callback that deanonymizes SSE chunks."""
-    def deanon_chunk(chunk: bytes) -> bytes:
-        text = chunk.decode("utf-8", errors="replace")
+    """Return a stream callback that deanonymizes SSE chunks.
 
-        socket = get_event_socket()
-        socket.broadcast({
-            "type": "sse_event",
-            "text": text,
-        })
+    Buffers incomplete redacted tokens (e.g. ``[PER``) across chunk boundaries
+    so that a token split like ``[PER`` + ``SON_0]`` is reassembled before the
+    regex tries to match it.
+    """
+    # Pattern that detects an incomplete token at the end of a chunk:
+    # an opening '[' followed by uppercase/underscore/digits but no closing ']'.
+    _PARTIAL_TOKEN_RE = re.compile(r'\[[A-Z_0-9]+$')
+
+    leftover = ""
+
+    def deanon_chunk(chunk: bytes) -> bytes:
+        nonlocal leftover
+        text = chunk.decode("utf-8", errors="replace")
 
         if not state["deanon_enabled"]:
             return chunk
+
+        # Prepend any leftover from the previous chunk
+        text = leftover + text
+        leftover = ""
+
+        # Check if the chunk ends with an incomplete token
+        m = _PARTIAL_TOKEN_RE.search(text)
+        if m:
+            leftover = text[m.start():]
+            text = text[:m.start()]
+
+        if not text:
+            return b""
 
         if sse_fields:
             text = _deanon_sse_targeted(text, sse_fields)
@@ -108,31 +145,67 @@ def _deanonymize_recursive(value):
     return value
 
 
-def _deanonymize_at_path(data, segments: list[str]):
-    """Walk *data* along jq-style *segments*, deanonymize at the leaf."""
-    if not segments:
-        return _deanonymize_recursive(data)
+def _normalize_path(raw_path: list) -> list:
+    """Collapse jq slice descriptor objects into plain integer indices.
 
-    seg, rest = segments[0], segments[1:]
+    jq's path() represents a slice like [1:] as {"start": 1, "end": null}
+    followed by an integer index into that slice.  We flatten these pairs
+    into a single absolute index so _get_at / _set_at only deal with
+    strings (dict keys) and ints (list indices).
+    """
+    result = []
+    i = 0
+    while i < len(raw_path):
+        key = raw_path[i]
+        if isinstance(key, dict) and "start" in key:
+            start = key.get("start") or 0
+            if i + 1 < len(raw_path) and isinstance(raw_path[i + 1], int):
+                result.append(start + raw_path[i + 1])
+                i += 2
+                continue
+        result.append(key)
+        i += 1
+    return result
 
-    if seg == "[]":
-        if isinstance(data, list):
-            return [_deanonymize_at_path(item, rest) for item in data]
-        return data
 
-    if isinstance(data, dict) and seg in data:
-        result = dict(data)
-        result[seg] = _deanonymize_at_path(data[seg], rest)
-        return result
+def _get_at(data, path: list):
+    for key in path:
+        data = data[key]
     return data
 
 
+def _set_at(data, path: list, value):
+    if not path:
+        return value
+    key, rest = path[0], path[1:]
+    if isinstance(data, list):
+        result = list(data)
+        result[key] = _set_at(result[key], rest, value)
+        return result
+    result = dict(data)
+    result[key] = _set_at(result[key], rest, value)
+    return result
+
+
 def _apply_deanon_paths(data, sensitive_fields):
-    """Apply deanonymization along parsed jq paths (or True)."""
+    """Apply deanonymization at jq path expressions (or recursively if True)."""
     if sensitive_fields is True:
         return _deanonymize_recursive(data)
-    for segments in sensitive_fields:
-        data = _deanonymize_at_path(data, segments)
+    for expr in sensitive_fields:
+        try:
+            raw_paths = _jq.all(f'path({expr})', data)
+        except Exception:
+            continue
+        for raw_path in raw_paths:
+            path = _normalize_path(raw_path)
+            try:
+                value = _get_at(data, path)
+            except (KeyError, IndexError, TypeError):
+                continue
+            if isinstance(value, str):
+                data = _set_at(data, path, text_anonymizer.deanonymize_text(value, mappings))
+            elif isinstance(value, (list, dict)):
+                data = _set_at(data, path, _deanonymize_recursive(value))
     return data
 
 
@@ -240,61 +313,92 @@ _BLOCK_HANDLERS = {
 }
 
 
-async def _anonymize_at_path(data, segments: list[str], string_only: bool = False):
-    """Walk *data* along jq-style *segments*, anonymize at the leaf.
-
-    string_only=True  — the path has more-specific sub-paths in the same rule
-                        (e.g. .messages[].content has .messages[].content[].text).
-                        Only string leaves are anonymized; list/dict leaves are
-                        skipped to avoid double-processing with the sub-paths.
-
-    string_only=False — no sub-paths exist for this path, so list/dict leaves
-                        are handed to _anonymize_recursive (e.g. tool_result
-                        .content, tool_use .input).
-    """
-    if not segments:
-        if isinstance(data, str):
-            return await text_anonymizer.anonymize_text(data, mappings)
-        if string_only:
-            return data
-        return await _anonymize_recursive(data)
-
-    seg, rest = segments[0], segments[1:]
-
-    if seg == "[]":
-        if isinstance(data, list):
-            return [await _anonymize_at_path(item, rest, string_only) for item in data]
-        return data
-
-    if isinstance(data, dict) and seg in data:
-        result = dict(data)
-        result[seg] = await _anonymize_at_path(data[seg], rest, string_only)
-        return result
-    return data
-
-
 async def _apply_paths(data, sensitive_fields):
-    """Apply a list of parsed jq paths (or True) to *data*.
+    """Anonymize every value reached by each jq path expression (or all if True).
 
-    Pre-computes which paths are prefixes of other paths in the same rule and
-    passes string_only=True for those, preventing double-processing.
+    For each expression, jq resolves it to a set of concrete paths.  String
+    leaves are passed to text_anonymizer; list/dict leaves to _anonymize_recursive
+    (which handles typed Anthropic content blocks).  Because jq iterates only
+    actual elements in the data, there is no double-processing risk from
+    overlapping path expressions.
     """
     if sensitive_fields is True:
         return await _anonymize_recursive(data)
 
-    # A path has sub-paths if any other path in the rule extends it.
-    has_subpaths = {
-        i
-        for i, si in enumerate(sensitive_fields)
-        if any(
-            i != j and len(sj) > len(si) and sj[:len(si)] == si
-            for j, sj in enumerate(sensitive_fields)
-        )
-    }
-
-    for i, segments in enumerate(sensitive_fields):
-        data = await _anonymize_at_path(data, segments, string_only=(i in has_subpaths))
+    for expr in sensitive_fields:
+        try:
+            raw_paths = _jq.all(f'path({expr})', data)
+        except Exception:
+            continue
+        for raw_path in raw_paths:
+            path = _normalize_path(raw_path)
+            try:
+                value = _get_at(data, path)
+            except (KeyError, IndexError, TypeError):
+                continue
+            if isinstance(value, str):
+                new_value = await text_anonymizer.anonymize_text(value, mappings)
+            elif isinstance(value, (list, dict)):
+                new_value = await _anonymize_recursive(value)
+            else:
+                continue
+            data = _set_at(data, path, new_value)
     return data
+
+
+# ---------------------------------------------------------------------------
+# Text collection helpers (for pre-warming entity cache across all fields)
+# ---------------------------------------------------------------------------
+
+def _collect_strings(value) -> list[str]:
+    """Recursively collect all string values, skipping image/binary blocks."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            result.extend(_collect_strings(item))
+        return result
+    if isinstance(value, dict):
+        block_type = value.get("type")
+        if block_type == "image":
+            return []
+        if block_type == "text":
+            t = value.get("text", "")
+            return [t] if t else []
+        if block_type == "document":
+            source = value.get("source", {})
+            if source.get("type") == "text":
+                d = source.get("data", "")
+                return [d] if d else []
+            return []
+        if block_type in ("thinking", "redacted_thinking"):
+            return []
+        result = []
+        for v in value.values():
+            result.extend(_collect_strings(v))
+        return result
+    return []
+
+
+def _collect_texts_for_fields(data, sensitive_fields) -> list[str]:
+    """Collect all text strings reachable via jq path expressions."""
+    if sensitive_fields is True:
+        return _collect_strings(data)
+    texts = []
+    for expr in sensitive_fields:
+        try:
+            raw_paths = _jq.all(f'path({expr})', data)
+        except Exception:
+            continue
+        for raw_path in raw_paths:
+            path = _normalize_path(raw_path)
+            try:
+                value = _get_at(data, path)
+            except (KeyError, IndexError, TypeError):
+                continue
+            texts.extend(_collect_strings(value))
+    return texts
 
 
 # ---------------------------------------------------------------------------
@@ -307,24 +411,13 @@ async def _apply_rule_json(request: Request, rule: RequestRule, url: str = ""):
         return
     body = json.loads(raw)
     original = json.dumps(body, ensure_ascii=False)
+    # Pre-warm: run finder[0] on ALL texts, then finder[1], etc. before per-field processing.
+    await text_anonymizer.prewarm_cache(_collect_texts_for_fields(body, rule.sensitive_fields), mappings)
     body = await _apply_paths(body, rule.sensitive_fields)
     if state["system_prompt_enabled"]:
         body = claude_system_prompt.inject(body, url)
     new_content = json.dumps(body, ensure_ascii=False)
-    import re as _re
-    if new_content != original:
-        orig_tokens = set(_re.findall(r'\[[A-Z_]+_\d+\]', original))
-        new_tokens = set(_re.findall(r'\[[A-Z_]+_\d+\]', new_content))
-        injected = new_tokens - orig_tokens
-        if injected:
-            print(f"[anonymizer] Tokens introduced: {injected}")
-            for tok in list(injected)[:10]:
-                idx = new_content.find(tok)
-                print(f"[anonymizer] '{tok}' context: ...{new_content[max(0,idx-80):idx+len(tok)+80]}...")
-        else:
-            print(f"[anonymizer] Body changed (system prompt injected, no new tokens)")
-    else:
-        print(f"[anonymizer] WARNING: body unchanged after anonymization ({len(original)} chars)")
+    _log_anonymization_diff(original, new_content)
     request.set_content(new_content.encode("utf-8"))
 
 
@@ -343,6 +436,35 @@ async def _apply_rule_multipart(request: Request, rule: RequestRule):
     # parts[0]  = preamble (empty)
     # parts[1:-1] = actual parts
     # parts[-1]  = "--\r\n" epilogue
+
+    # Pre-warm: collect all text strings from all parts, then run finders in batch.
+    # Wrap each part as {field_name: parsed} so sensitive_fields paths work directly.
+    all_texts: list[str] = []
+    for part in parts[1:-1]:
+        sep_pos = part.find(b"\r\n\r\n")
+        if sep_pos == -1:
+            continue
+        part_headers_text = part[:sep_pos].decode("utf-8", errors="replace")
+        ct_match = re.search(r'content-type:\s*(\S+)', part_headers_text, re.IGNORECASE)
+        part_ct = (ct_match.group(1).rstrip(";") if ct_match else "")
+        if part_ct.startswith("image/"):
+            continue
+        content_bytes = part[sep_pos + 4:]
+        if content_bytes.endswith(b"\r\n"):
+            content_bytes = content_bytes[:-2]
+        try:
+            content_text = content_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        try:
+            parsed = json.loads(content_text)
+            name_match = re.search(r'name="([^"]*)"', part_headers_text, re.IGNORECASE)
+            field_name = name_match.group(1) if name_match else ""
+            wrapped = {field_name: parsed} if rule.sensitive_fields is not True else parsed
+            all_texts.extend(_collect_texts_for_fields(wrapped, rule.sensitive_fields))
+        except (json.JSONDecodeError, ValueError):
+            all_texts.append(content_text)
+    await text_anonymizer.prewarm_cache(all_texts, mappings)
 
     new_parts = [parts[0]]
 
@@ -367,19 +489,6 @@ async def _apply_rule_multipart(request: Request, rule: RequestRule):
         part_headers_text = part_headers_bytes.decode("utf-8", errors="replace")
         name_match = re.search(r'name="([^"]*)"', part_headers_text, re.IGNORECASE)
         field_name = name_match.group(1) if name_match else ""
-
-        # Decide whether and how to process this part
-        if rule.sensitive_fields is True:
-            sub_paths = None  # anonymize everything
-        elif isinstance(rule.sensitive_fields, list):
-            matching = [segs[1:] for segs in rule.sensitive_fields if segs and segs[0] == field_name]
-            if not matching:
-                new_parts.append(part)
-                continue
-            sub_paths = matching
-        else:
-            new_parts.append(part)
-            continue
 
         # Check if this part is an image — route to image_anonymizer
         ct_match = re.search(r'content-type:\s*(\S+)', part_headers_text, re.IGNORECASE)
@@ -408,12 +517,14 @@ async def _apply_rule_multipart(request: Request, rule: RequestRule):
 
         try:
             parsed = json.loads(content_text)
-            if sub_paths is None:
+            if rule.sensitive_fields is True:
                 anonymized = await _anonymize_recursive(parsed)
             else:
-                anonymized = parsed
-                for segs in sub_paths:
-                    anonymized = await _anonymize_at_path(anonymized, segs)
+                # Wrap as {field_name: ...} so sensitive_fields paths resolve correctly,
+                # then unwrap after applying.
+                wrapped = {field_name: parsed}
+                wrapped = await _apply_paths(wrapped, rule.sensitive_fields)
+                anonymized = wrapped[field_name]
             new_content = json.dumps(anonymized, ensure_ascii=False).encode("utf-8")
         except (json.JSONDecodeError, ValueError):
             anonymized_text = await text_anonymizer.anonymize_text(content_text, mappings)
@@ -435,6 +546,7 @@ async def _apply_rule_urlencoded(request: Request, rule: RequestRule):
         except (json.JSONDecodeError, ValueError):
             parsed[key] = form[key]
 
+    await text_anonymizer.prewarm_cache(_collect_texts_for_fields(parsed, rule.sensitive_fields), mappings)
     parsed = await _apply_paths(parsed, rule.sensitive_fields)
 
     for key in list(form.keys()):
@@ -464,6 +576,7 @@ async def apply_request_rules(flow: http.HTTPFlow, request_rules: list[RequestRu
     if not matched_rule:
         return False
 
+    t0 = time.time()
     print(f"[anonymizer] Rule matched: {matched_rule.url_pattern.pattern} for {url}")
     content_type = request.headers.get("content-type", "")
 
@@ -474,7 +587,9 @@ async def apply_request_rules(flow: http.HTTPFlow, request_rules: list[RequestRu
             await _apply_rule_urlencoded(request, matched_rule)
         else:
             await _apply_rule_json(request, matched_rule, url)
-        print(f"[anonymizer] Done processing {url}")
+        t1 = time.time()
+        print(f"[anonymizer] Done processing {url}.")
+        print(f"[anonymizer] Took {t1 - t0} seconds to process.")
     except Exception as e:
         import traceback
         print(f"[anonymizer] ERROR anonymizing {request.pretty_url}: {e}")

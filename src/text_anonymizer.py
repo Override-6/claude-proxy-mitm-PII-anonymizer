@@ -11,10 +11,10 @@ from datetime import datetime, timezone
 from typing import List
 
 from entity_finder import Entity
+from entity_finder.mappings_finder import MappingsEntityFinder
 from entity_finder.ner_finder import NEREntityFinder
-from entity_finder.regex_finder import RegexEntityFinder
-from event_socket import get_event_socket
-from mappings import Mappings
+from entity_finder.presidio_finder import PresidioEntityFinder
+from mappings import Mappings, REDACTED_REGEX
 
 log = logging.getLogger(__name__)
 
@@ -27,34 +27,22 @@ _gliner_sem = asyncio.Semaphore(1)
 _entity_cache: dict[str, tuple[Entity, ...]] = {}
 _entity_cache_hits: dict[str, int] = {}
 
-EMAIL_REGEX = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
-PHONE_REGEX = re.compile(
-    r'(?<!\d)'
-    r'(?:'
-    # International +CC: compact (+33761647274) or with separators (+33 7 61 64 72 74)
-    r'\+\d{1,3}(?:\d{6,12}|[\s\-.]?\(?\d{1,4}\)?(?:[\s\-.]?\d{2,4}){1,3})'
-    r'|'
-    # Local 0-prefix: compact (0761647274) or with separators (06 12 34 56 78)
-    r'0\d{1,4}(?:\d{6,10}|(?:[\s\-.]?\d{2,4}){2,4})'
-    r'|'
-    # Parenthesized area code: (NXX) NXX-XXXX
-    r'\(\d{2,4}\)[\s\-.]?\d{3,4}[\s\-.]?\d{4}'
-    r'|'
-    # Consistent-separator groups without prefix: NXX-NXX-XXXX or NXX NXX XXXX
-    # Backreference ensures the same separator is used throughout
-    r'\d{2,4}([\s\-])\d{3,4}\1\d{3,4}'
-    r')'
-    r'(?!\d)'
-)
+# Priority order: finders earlier in the list win on overlapping spans.
+# Presidio handles structured PII (email, phone, credit card, IBAN, SSN, IP).
+# GLiNER handles semantic NER (person names, organizations, locations).
+# MappingsEntityFinder catches any previously-seen entities missed above.
+_entity_finders = [
+    PresidioEntityFinder(),
+    NEREntityFinder(),
+    MappingsEntityFinder()
+]
 
-_regex_finder = RegexEntityFinder([
-    (EMAIL_REGEX, "EMAIL"),
-    (PHONE_REGEX, "PHONE"),
-])
-_ner_finder = NEREntityFinder()
-
-REDACTED_REGEX = re.compile(r'\[[A-Z_]+_[0-9]+]')
 _EXEMPT_RE = re.compile(r'\{\{(.*?)\}\}', re.DOTALL)
+
+
+def _no_overlap(entity: Entity, accepted: list[Entity]) -> bool:
+    """Return True if *entity* does not overlap any already-accepted entity."""
+    return not any(entity.start < a.end and entity.end > a.start for a in accepted)
 
 
 def _strip_exempt_markers(text: str) -> tuple[str, list[tuple[int, int]]]:
@@ -85,22 +73,21 @@ def _strip_exempt_markers(text: str) -> tuple[str, list[tuple[int, int]]]:
     return "".join(parts), exempt_spans
 
 
-def _run_entity_detection(text: str) -> tuple[Entity, ...]:
+def _run_entity_detection(text: str, mappings: Mappings) -> tuple[Entity, ...]:
     """Run all finders on *text* and return deduplicated entities.
 
-    Finders run in priority order; later-finder entities overlapping an
-    already-accepted span are discarded (prevents NER from grabbing email
-    local-parts as PERSON, etc.).
+    Finders run in priority order (_entity_finders); later-finder entities
+    overlapping an already-accepted span are discarded (prevents NER from
+    grabbing email local-parts as PERSON, etc.).
     """
-    regex_entities = _regex_finder.find_entities(text)
-
     if not text.strip():
-        return tuple(regex_entities)
+        return ()
 
-    accepted: list[Entity] = list(regex_entities)
-    for entity in _ner_finder.find_entities(text):
-        if not any(entity.start < a.end and entity.end > a.start for a in accepted):
-            accepted.append(entity)
+    accepted: list[Entity] = []
+    for finder in _entity_finders:
+        for entity in finder.find_entities(text, mappings):
+            if _no_overlap(entity, accepted):
+                accepted.append(entity)
     return tuple(accepted)
 
 
@@ -126,9 +113,9 @@ async def _cache_prune_loop():
         # Next boundary: either midnight or noon, whichever comes first
         next_hour = 12 if now.hour < 12 else 24  # 24 → wraps to 00:00 next day
         seconds_until = (
-            (next_hour - now.hour) * 3600
-            - now.minute * 60
-            - now.second
+                (next_hour - now.hour) * 3600
+                - now.minute * 60
+                - now.second
         )
         await asyncio.sleep(seconds_until)
         _prune_entity_cache()
@@ -139,33 +126,67 @@ def start_cache_prune_task():
     asyncio.get_event_loop().create_task(_cache_prune_loop())
 
 
-def detect_entities(text: str) -> List[Entity]:
+def detect_entities(text: str, mappings: Mappings) -> List[Entity]:
     if text not in _entity_cache:
-        _entity_cache[text] = _run_entity_detection(text)
+        _entity_cache[text] = _run_entity_detection(text, mappings)
     return list(_entity_cache[text])
 
 
+async def prewarm_cache(texts: List[str], mappings: Mappings) -> None:
+    """Pre-populate entity cache for a batch of texts using finder-first ordering.
 
-def detect_entities_batch(texts: List[str]) -> List[List[Entity]]:
-    """Detect entities across multiple texts using batched NER + regex.
+    Runs finder[0] on ALL texts, then finder[1] on ALL texts, etc.  This is the
+    batch counterpart of _run_entity_detection and ensures GLiNER (and other
+    heavy finders) process all texts in a single pass rather than one at a time.
+
+    Already-cached texts are skipped so repeated calls are cheap.
+    """
+    clean_texts: List[str] = []
+    for text in texts:
+        if not text.strip():
+            continue
+        clean, _ = _strip_exempt_markers(text)
+        if clean.strip() and clean not in _entity_cache:
+            clean_texts.append(clean)
+
+    if not clean_texts:
+        return
+
+    per_text_accepted: list[list[Entity]] = [[] for _ in clean_texts]
+
+    def _run_sequential():
+        # Run each finder in order and commit new entities to mappings.kp between
+        # finders so that MappingsEntityFinder can find entities detected earlier.
+        for finder in _entity_finders:
+            batch_results = finder.find_entities_batch(clean_texts, mappings)
+            for i, entities in enumerate(batch_results):
+                for entity in entities:
+                    accepted = per_text_accepted[i]
+                    if _no_overlap(entity, accepted):
+                        accepted.append(entity)
+                        mappings.get_or_set_redacted_text(entity.text, entity.type)
+
+    async with _gliner_sem:
+        await asyncio.to_thread(_run_sequential)
+
+    for i, clean in enumerate(clean_texts):
+        _entity_cache[clean] = tuple(per_text_accepted[i])
+        _entity_cache_hits[clean] = 0
+
+
+def detect_entities_batch(texts: List[str], mappings: Mappings) -> List[List[Entity]]:
+    """Detect entities across multiple texts, respecting _entity_finders priority order.
 
     Used by image_anonymizer to process all OCR lines in one pass.
     """
-    # Regex first (higher priority)
-    regex_results: list[list[Entity]] = [
-        _regex_finder.find_entities(t) for t in texts
-    ]
-
-    # NER: batch — single model pass for all texts
-    ner_results: list[list[Entity]] = _ner_finder.find_entities_batch(texts)
-
-    # Merge: NER entities overlapping a regex match are discarded
+    per_finder = [finder.find_entities_batch(texts, mappings) for finder in _entity_finders]
     merged = []
-    for regex_ents, ner_ents in zip(regex_results, ner_results):
-        accepted = list(regex_ents)
-        for entity in ner_ents:
-            if not any(entity.start < a.end and entity.end > a.start for a in accepted):
-                accepted.append(entity)
+    for i in range(len(texts)):
+        accepted: list[Entity] = []
+        for finder_results in per_finder:
+            for entity in finder_results[i]:
+                if _no_overlap(entity, accepted):
+                    accepted.append(entity)
         merged.append(accepted)
     return merged
 
@@ -181,7 +202,7 @@ async def anonymize_text(text: str, mappings: Mappings) -> str:
         entities = _entity_cache[clean_text]
     else:
         async with _gliner_sem:
-            entities = await asyncio.to_thread(_run_entity_detection, clean_text)
+            entities = await asyncio.to_thread(_run_entity_detection, clean_text, mappings)
             _entity_cache[clean_text] = entities
             _entity_cache_hits[clean_text] = 0
 
@@ -191,16 +212,7 @@ async def anonymize_text(text: str, mappings: Mappings) -> str:
         if not any(e.start < ee and e.end > es for es, ee in exempt_spans)
     ]
 
-    redacted_entities = [(ent, mappings.get_redacted_text(ent.text, ent.type)) for ent in active]
-
-    socket = get_event_socket()
-    socket.broadcast({
-        "type": "anonymize_text",
-        "entities": [{
-            "entity": ent.text,
-            "redacted": redacted_text,
-        } for ent, redacted_text in redacted_entities],
-    })
+    redacted_entities = [(ent, mappings.get_or_set_redacted_text(ent.text, ent.type)) for ent in active]
 
     if not active and not exempt_spans:
         return clean_text
@@ -211,8 +223,8 @@ async def anonymize_text(text: str, mappings: Mappings) -> str:
     #  - redactions: replace entity span with redacted token
     #  - exempt rewrap: re-insert {{...}} around exempt content
     ops = (
-        [(ent.start, ent.end, redacted) for ent, redacted in redacted_entities] +
-        [(s, e, None) for s, e in exempt_spans]
+            [(ent.start, ent.end, redacted) for ent, redacted in redacted_entities] +
+            [(s, e, None) for s, e in exempt_spans]
     )
     for s, e, replacement in sorted(ops, key=lambda x: x[0], reverse=True):
         if replacement is not None:
