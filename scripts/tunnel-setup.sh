@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tunnel-setup.sh — Keep an SSH tunnel to maxou.dev:8080 alive via systemd.
 # Run as the user (not root).
-set -euo pipefail
+set -euxo pipefail
 
 UNIT="claude-proxy-tunnel"
 SERVICE_FILE="$HOME/.config/systemd/user/${UNIT}.service"
@@ -23,6 +23,7 @@ RestartSec=5
 WantedBy=default.target
 UNIT
 
+echo PLEASE DONT RUN THIS SCRIPT AS ROOT OR THE FOLLOWING COMMAND WILL FAIL
 systemctl --user daemon-reload
 systemctl --user enable --now "$UNIT"
 echo "==> Tunnel service started. Check: systemctl --user status $UNIT"

@@ -285,7 +285,7 @@ async def _block_document(block: dict) -> dict:
 
 async def _block_tool_use(block: dict) -> dict:
     """{"type":"tool_use", "input": {...}}  — anonymize the input object."""
-    return {**block, "input": await _anonymize_recursive(block.get("input") or {}, "")}
+    return {**block, "input": await _anonymize_recursive(block.get("input") or {})}
 
 
 async def _block_tool_result(block: dict) -> dict:

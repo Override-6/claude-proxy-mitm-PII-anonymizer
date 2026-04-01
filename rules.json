@@ -43,7 +43,8 @@
       "sensitive_fields": [
         ".system[1:][].text",
         ".messages[].content",
-        ".tools[]"
+        ".tools[].description",
+        ".tools[].input_schema | .. | objects | .description?"
       ]
     },
     {

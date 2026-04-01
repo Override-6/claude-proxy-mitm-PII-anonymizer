@@ -96,20 +96,14 @@ def _run_entity_detection(text: str, mappings: Mappings) -> tuple[Entity, ...]:
 
     accepted: list[Entity] = []
     for finder in _entity_finders:
-        print(f"[DEBUG] finder {finder}")
         for entity in finder.find_entities(text, mappings):
             if _is_exempt(entity):
-                print(f"[DEBUG] exempted entity {entity}")
                 continue
             # ensure no entity finder flags a redacted token as an entity
             if REDACTED_REGEX.fullmatch(entity.text):
-                print(f"[DEBUG] redacted regex entity {entity}")
                 continue
             if _no_overlap(entity, accepted):
                 accepted.append(entity)
-                print(f"[DEBUG] accepted entity {entity}")
-            else:
-                print(f"[DEBUG] overlapping entity {entity}")
     return tuple(accepted)
 
 
@@ -186,18 +180,13 @@ async def prewarm_cache(texts: List[str], mappings: Mappings) -> None:
             for i, entities in enumerate(batch_results):
                 for entity in entities:
                     if _is_exempt(entity):
-                        print(f"[DEBUG] exempt entity {entity}")
                         continue
                     if REDACTED_REGEX.fullmatch(entity.text):
-                        print(f"[DEBUG] REDACTED_REGEX fullmatch entity {entity}")
                         continue
                     accepted = per_text_accepted[i]
                     if _no_overlap(entity, accepted):
                         accepted.append(entity)
                         mappings.get_or_set_redacted_text(entity.text, entity.type)
-                        print(f"[DEBUG] Accepted entity {entity}")
-                    else:
-                        print(f"[DEBUG] overlap entity {entity}")
 
     async with _scan_sem:
         await asyncio.to_thread(_run_sequential)

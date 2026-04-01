@@ -37,16 +37,16 @@ def anxious_filter(mappings: Mappings, request_body: str) -> Tuple[bool, list[En
     return len(entities) > 0, entities
 
 def trigger_anxious_filter(url: str, flow: http.HTTPFlow, entities: list[Entity]):
-    flow.response = http.Response.make(
-        403,
-        "Blocked by proxy: request contains unredacted sensible data.",
-        {"Content-Type": "text/plain"},
-    )
+    # flow.response = http.Response.make(
+    #     403,
+    #     "Blocked by proxy: request contains unredacted sensible data.",
+    #     {"Content-Type": "text/plain"},
+    # )
 
     print("[proxy] Anxious filter triggered !")
     print(f"[proxy] Request {url} contained {len(entities)} unmasked sensible entities.")
     print(f"[proxy] entities are ", set(e.text for e in entities))
-    print("[proxy] Dropping request and returning 403 instead.")
+    # print("[proxy] Dropping request and returning 403 instead.")
     dump_path = "/app/ignore/last_anxious_filter.json"
     os.makedirs("/app/ignore", exist_ok=True)
     with open(dump_path, "w") as f:
