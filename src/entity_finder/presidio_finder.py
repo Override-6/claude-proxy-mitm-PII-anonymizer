@@ -86,6 +86,9 @@ class PresidioEntityFinder(AbstractEntityFinder):
             # Skip non-PII IPs
             if entity_type == "IP_ADDRESS" and span_text in _IGNORE_IPS:
                 continue
+            # Skip phone matches embedded inside a larger token (e.g. "haiku-4-5-20251001")
+            if entity_type == "PHONE" and r.start > 0 and not text[r.start - 1].isspace():
+                continue
             out.append(Entity(span_text, entity_type, r.start, r.end))
         return out
 

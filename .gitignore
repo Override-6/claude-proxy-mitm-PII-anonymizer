@@ -4,3 +4,7 @@ ignore
 cache/
 data/
 **/__pycache__
+
+models/
+
+.env

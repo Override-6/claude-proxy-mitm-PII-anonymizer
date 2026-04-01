@@ -20,6 +20,9 @@ class ProxyRules:
     blocked_urls: list[BlockedUrl]
     request_rules: list[RequestRule]
     response_rules: list[RequestRule]
+    mcp_rules: list[RequestRule]
+    exempt_words: frozenset[str]
+    anxiety_watchlist: list[re.Pattern]
 
 
 def _parse_rule_list(raw_rules: list[dict]) -> list[RequestRule]:
@@ -44,8 +47,15 @@ def load_rules() -> ProxyRules:
         for b in rules.get("blocked_urls", [])
     ]
 
+    exempt = frozenset(w.lower() for w in rules.get("exempt_words", []))
+
+    rules_watchlist = [re.compile(pattern) for pattern in rules["anxiety_watchlist"]]
+
     return ProxyRules(
         blocked,
         _parse_rule_list(rules.get("request_rules", [])),
         _parse_rule_list(rules.get("response_rules", [])),
+        _parse_rule_list(rules.get("mcp_rules", [])),
+        exempt,
+        rules_watchlist
     )

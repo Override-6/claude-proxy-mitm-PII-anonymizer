@@ -18,12 +18,12 @@ from mappings import Mappings, REDACTED_REGEX
 
 log = logging.getLogger(__name__)
 
-# Limit concurrent GLiNER inference to 1.
-# On Raspberry Pi 4 (ARMv8.0, 3.7 GB RAM) running GLiNER simultaneously in
+# Limit concurrent entity scan inference to 1.
+# On Raspberry Pi 4 (ARMv8.0, 3.7 GB RAM) running entity scan simultaneously in
 # multiple asyncio.to_thread calls causes OOM kills and SIGILL crashes.
 # The semaphore is only acquired on a cache miss — cache hits skip it entirely
 # so large conversation histories (many repeated blocks) don't queue needlessly.
-_gliner_sem = asyncio.Semaphore(1)
+_scan_sem = asyncio.Semaphore(1)
 _entity_cache: dict[str, tuple[Entity, ...]] = {}
 _entity_cache_hits: dict[str, int] = {}
 
@@ -38,6 +38,17 @@ _entity_finders = [
 ]
 
 _EXEMPT_RE = re.compile(r'\{\{(.*?)\}\}', re.DOTALL)
+
+# Words that should never be anonymized (loaded from rules.json "exempt_words").
+# Compared case-insensitively: any entity whose text matches exactly (ignoring case)
+# or whose every word is in this set will be dropped.
+exempt_words: frozenset[str] = frozenset()
+
+
+def _is_exempt(entity: Entity) -> bool:
+    """Return True if any word in the entity text is in the exempt_words set."""
+    words = entity.text.lower().split()
+    return bool(words) and any(w in exempt_words for w in words)
 
 
 def _no_overlap(entity: Entity, accepted: list[Entity]) -> bool:
@@ -85,9 +96,20 @@ def _run_entity_detection(text: str, mappings: Mappings) -> tuple[Entity, ...]:
 
     accepted: list[Entity] = []
     for finder in _entity_finders:
+        print(f"[DEBUG] finder {finder}")
         for entity in finder.find_entities(text, mappings):
+            if _is_exempt(entity):
+                print(f"[DEBUG] exempted entity {entity}")
+                continue
+            # ensure no entity finder flags a redacted token as an entity
+            if REDACTED_REGEX.fullmatch(entity.text):
+                print(f"[DEBUG] redacted regex entity {entity}")
+                continue
             if _no_overlap(entity, accepted):
                 accepted.append(entity)
+                print(f"[DEBUG] accepted entity {entity}")
+            else:
+                print(f"[DEBUG] overlapping entity {entity}")
     return tuple(accepted)
 
 
@@ -145,6 +167,8 @@ async def prewarm_cache(texts: List[str], mappings: Mappings) -> None:
     for text in texts:
         if not text.strip():
             continue
+        if REDACTED_REGEX.fullmatch(text):
+            continue
         clean, _ = _strip_exempt_markers(text)
         if clean.strip() and clean not in _entity_cache:
             clean_texts.append(clean)
@@ -161,12 +185,21 @@ async def prewarm_cache(texts: List[str], mappings: Mappings) -> None:
             batch_results = finder.find_entities_batch(clean_texts, mappings)
             for i, entities in enumerate(batch_results):
                 for entity in entities:
+                    if _is_exempt(entity):
+                        print(f"[DEBUG] exempt entity {entity}")
+                        continue
+                    if REDACTED_REGEX.fullmatch(entity.text):
+                        print(f"[DEBUG] REDACTED_REGEX fullmatch entity {entity}")
+                        continue
                     accepted = per_text_accepted[i]
                     if _no_overlap(entity, accepted):
                         accepted.append(entity)
                         mappings.get_or_set_redacted_text(entity.text, entity.type)
+                        print(f"[DEBUG] Accepted entity {entity}")
+                    else:
+                        print(f"[DEBUG] overlap entity {entity}")
 
-    async with _gliner_sem:
+    async with _scan_sem:
         await asyncio.to_thread(_run_sequential)
 
     for i, clean in enumerate(clean_texts):
@@ -185,6 +218,8 @@ def detect_entities_batch(texts: List[str], mappings: Mappings) -> List[List[Ent
         accepted: list[Entity] = []
         for finder_results in per_finder:
             for entity in finder_results[i]:
+                if _is_exempt(entity):
+                    continue
                 if _no_overlap(entity, accepted):
                     accepted.append(entity)
         merged.append(accepted)
@@ -194,14 +229,23 @@ def detect_entities_batch(texts: List[str], mappings: Mappings) -> List[List[Ent
 async def anonymize_text(text: str, mappings: Mappings) -> str:
     clean_text, exempt_spans = _strip_exempt_markers(text)
 
-    # Cache hit: return instantly, no semaphore needed.
+    # Cache hit: return instantly for heavy finders, but always re-run MappingsEntityFinder
+    # to catch entities added to mappings after the cache entry was created.
     # Cache miss: serialize GLiNER inference — prevents concurrent PyTorch calls
     # that cause OOM / SIGILL on Raspberry Pi 4 (ARMv8.0, 3.7 GB RAM).
     if clean_text in _entity_cache:
         _entity_cache_hits[clean_text] = _entity_cache_hits.get(clean_text, 0) + 1
-        entities = _entity_cache[clean_text]
+        base_entities = list(_entity_cache[clean_text])
+        # MappingsEntityFinder must run fresh: mappings grow over time, cache entries are stale.
+        mappings_finder = _entity_finders[-1]
+        for entity in mappings_finder.find_entities(clean_text, mappings):
+            if _is_exempt(entity) or REDACTED_REGEX.fullmatch(entity.text):
+                continue
+            if _no_overlap(entity, base_entities):
+                base_entities.append(entity)
+        entities = tuple(base_entities)
     else:
-        async with _gliner_sem:
+        async with _scan_sem:
             entities = await asyncio.to_thread(_run_entity_detection, clean_text, mappings)
             _entity_cache[clean_text] = entities
             _entity_cache_hits[clean_text] = 0
@@ -240,5 +284,12 @@ def deanonymize_text(text: str, mappings: Mappings) -> str:
     for match in reversed(list(REDACTED_REGEX.finditer(text))):
         sensitive_value = mappings.get_sensitive_value(match.group(0))
         chars[match.start():match.end()] = list(sensitive_value)
+        print('[deanonymize_text] found token {}: current text = {}'.format(match, ''.join(chars)))
 
     return "".join(chars)
+
+
+def clear_entity_cache() -> None:
+    """Clear the entity detection cache. Call when mappings are reset."""
+    _entity_cache.clear()
+    _entity_cache_hits.clear()

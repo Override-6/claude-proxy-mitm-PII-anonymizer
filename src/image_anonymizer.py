@@ -235,8 +235,9 @@ _reader: Optional[easyocr.Reader] = None
 def _get_reader() -> easyocr.Reader:
     global _reader
     if _reader is None:
-        log.info("Loading EasyOCR reader (first call)…")
-        _reader = easyocr.Reader(["en", "fr"], gpu=False, verbose=False)
+        use_gpu = torch.cuda.is_available()
+        log.info("Loading EasyOCR reader (first call, gpu=%s)…", use_gpu)
+        _reader = easyocr.Reader(["en", "fr"], gpu=use_gpu, verbose=False)
         log.info("EasyOCR reader ready.")
     return _reader
 
@@ -507,11 +508,6 @@ def anonymize_image(image_bytes: bytes, mappings: Mappings) -> Tuple[bytes, str]
 
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    all_regions = [r for _, regions in merged for r in regions]
-    avg_height = (sum(r.bottom - r.top for r in all_regions) // len(all_regions)
-                  if all_regions else 12)
-    initial_font_size = max(_MIN_FONT_SIZE, int(avg_height * 0.85))
-
     ocr_text = "\n".join(t for t, _ in merged)
 
     draw = ImageDraw.Draw(image)
@@ -532,7 +528,7 @@ def anonymize_image(image_bytes: bytes, mappings: Mappings) -> Tuple[bytes, str]
 
             draw.rectangle([left, top, right, bottom], fill=(0, 0, 0))
 
-            font, tw, th = _fit_font(draw, redacted, box_w, box_h, initial_font_size)
+            font, tw, th = _fit_font(draw, redacted, box_w, box_h, box_h)
             # Center the label vertically; align left with small padding
             ty = top + (box_h - th) // 2
             draw.text((left + 2, ty), redacted, fill=(255, 255, 255), font=font)

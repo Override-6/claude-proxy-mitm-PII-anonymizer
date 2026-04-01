@@ -1,11 +1,24 @@
 services:
   mitm-proxy:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/proxy.dockerfile
     image: claude-mitm-proxy:latest
     container_name: claude-mitm-proxy
     restart: unless-stopped
+    # Dual-mode: forward proxy on 8080 (Claude API traffic) +
+    #            reverse proxy on 8001 (MCP server traffic, deanon/anon)
+    command: >
+      poetry run mitmdump
+      -s src/proxy.py
+      --mode regular@0.0.0.0:8080
+      --mode reverse:http://google-workspace-mcp:8000@0.0.0.0:8000
+      --set console_eventlog_verbosity=info
+      --set flow_detail=0
+      --set script_reload=false
     ports:
       - "8080:8080"
+      - "8000:8000"
       - "127.0.0.1:9999:9999"
     volumes:
       # Persists mitmproxy CA cert across restarts.
@@ -22,5 +35,27 @@ services:
       - ./data/hf_cache:/root/.cache/huggingface
       # Mount source code so code changes take effect without rebuilding the image
       - ./src:/app/src
+      # All /app/data output (redacted images, request log, …)
+      - ./data:/app/data
     environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - google-workspace-mcp
+
+  google-workspace-mcp:
+    build:
+      context: .
+      dockerfile: docker/gw-mcp.dockerfile
+    container_name: google-workspace-mcp
+    restart: unless-stopped
+    volumes:
+      # Persists OAuth tokens across container restarts.
+      - ./data/google-workspace-mcp:/app/tokens
+    environment:
+      - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}
+      - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET}
+      # Must match exactly what you registered in Google Cloud Console.
+      - GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/oauth2callback
+      # Required when running OAuth over plain HTTP (local dev / Docker).
+      - OAUTHLIB_INSECURE_TRANSPORT=1
       - PYTHONUNBUFFERED=1

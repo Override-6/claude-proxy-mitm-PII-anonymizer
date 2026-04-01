@@ -54,6 +54,14 @@ def _handle(cmd: str, state: dict) -> dict:
         state["system_prompt_enabled"] = False
         return {"ok": True, "system_prompt_enabled": False}
 
+    if cmd == "log requests on":
+        state["log_requests"] = True
+        return {"ok": True, "log_requests": True}
+
+    if cmd == "log requests off":
+        state["log_requests"] = False
+        return {"ok": True, "log_requests": False}
+
     if cmd == "status":
         return {
             "ok": True,
@@ -62,6 +70,7 @@ def _handle(cmd: str, state: dict) -> dict:
             "anxious_enabled": state["anxious_enabled"],
             "save_images": state["save_images"],
             "system_prompt_enabled": state["system_prompt_enabled"],
+            "log_requests": state["log_requests"],
         }
 
     if cmd == "dump":
@@ -70,7 +79,7 @@ def _handle(cmd: str, state: dict) -> dict:
 
     if cmd == "clear":
         mappings = state["mappings"]
-        mappings.clear_all()
+        mappings.reset()
         return {"ok": True, "cleared": True}
 
     return {"ok": False, "error": f"unknown command: {cmd!r}"}

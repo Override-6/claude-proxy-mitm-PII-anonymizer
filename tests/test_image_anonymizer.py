@@ -68,7 +68,7 @@ def test_email_is_redacted():
     image_bytes = _make_image(f"Email: {pii}")
     mappings = Mappings()
 
-    result = image_anonymizer.anonymize_image(image_bytes, mappings)
+    result, _ = image_anonymizer.anonymize_image(image_bytes, mappings)
 
     assert result != image_bytes, "Image was not modified"
     assert len(mappings._sensitive_to_redacted) > 0, "Nothing was mapped"
@@ -85,7 +85,7 @@ def test_person_name_is_redacted():
     image_bytes = _make_image(f"Hello my name is {pii}.")
     mappings = Mappings()
 
-    result = image_anonymizer.anonymize_image(image_bytes, mappings)
+    result, _ = image_anonymizer.anonymize_image(image_bytes, mappings)
 
     out_text = _ocr_text(result)
     # At least one token of the name should have been blacked out
@@ -98,7 +98,7 @@ def test_no_pii_returns_identical_bytes():
     image_bytes = _make_image("The weather is nice today.")
     mappings = Mappings()
 
-    result = image_anonymizer.anonymize_image(image_bytes, mappings)
+    result, _ = image_anonymizer.anonymize_image(image_bytes, mappings)
 
     assert result == image_bytes, "Image was modified despite no PII"
 
@@ -138,7 +138,7 @@ def test_empty_image_no_crash():
     image_bytes = _make_image("")
     mappings = Mappings()
 
-    result = image_anonymizer.anonymize_image(image_bytes, mappings)
+    result, _ = image_anonymizer.anonymize_image(image_bytes, mappings)
 
     assert isinstance(result, bytes) and len(result) > 0
 
@@ -154,7 +154,7 @@ def test_real_world_notes_image():
         image_bytes = f.read()
 
     mappings = Mappings()
-    result = image_anonymizer.anonymize_image(image_bytes, mappings)
+    result, _ = image_anonymizer.anonymize_image(image_bytes, mappings)
 
     assert len(mappings._sensitive_to_redacted) > 0, \
         "No PII detected in real-world notes screenshot"
@@ -172,7 +172,7 @@ def test_real_world_excel_image():
         image_bytes = f.read()
 
     mappings = Mappings()
-    result = image_anonymizer.anonymize_image(image_bytes, mappings)
+    result, _ = image_anonymizer.anonymize_image(image_bytes, mappings)
 
     assert len(mappings._sensitive_to_redacted) > 0, \
         "No PII detected in real-world Excel screenshot"

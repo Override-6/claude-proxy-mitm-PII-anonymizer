@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "claude-proxy-mitm-pii-anonymizer"
+version = "0.1.0"
+description = "MITM proxy that anonymizes PII in Claude Desktop HTTPS traffic"
+authors = []
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.12"
+mitmproxy = ">=11.0.0"
+easyocr = ">=1.7.0"
+Pillow = ">=10.0.0"
+gliner = ">=0.2.0"
+psutil = ">=5.9.0"
+presidio-analyzer = ">=2.2"
+jq = ">=1.6.0"
+numpy = ">=2.0.0"
+pyahocorasick = "^2.3.0"
+
+[tool.poetry.group.training.dependencies]
+datasets = ">=4.0.0"
+transformers = ">=4.40.0"
+accelerate = ">=1.1.0"
+seqeval = ">=1.2.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

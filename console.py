@@ -10,6 +10,7 @@ Commands:
   deanon on/off            Enable / disable response deanonymization
   save images on/off       Save redacted images to ignore/redacted_images/
   system prompt on/off     Enable / disable SYSTEM_PROMPT.md injection
+  log requests on/off      Log raw requests (pre-anonymization) to data/requests-sample.jsonl
   status                   Show current state
   dump                     Print all known entity mappings
   clear                    Wipe the entity mapping table
@@ -62,6 +63,7 @@ def handle(cmd: str, host: str, port: int):
                "anxious on", "anxious off",
                "save images on", "save images off",
                "system prompt on", "system prompt off",
+               "log requests on", "log requests off",
                "status", "dump", "clear"):
         try:
             resp = send(cmd, host, port)
@@ -82,6 +84,7 @@ def handle(cmd: str, host: str, port: int):
             print(f"  anxious        {fmt_bool(resp['anxious_enabled'])}")
             print(f"  save images    {fmt_bool(resp.get('save_images', False))}")
             print(f"  system prompt  {fmt_bool(resp.get('system_prompt_enabled', False))}")
+            print(f"  log requests   {fmt_bool(resp.get('log_requests', False))}")
 
 
         elif cmd == "dump":
@@ -112,6 +115,9 @@ def handle(cmd: str, host: str, port: int):
         elif cmd.startswith("system prompt"):
             print(f"  system prompt {fmt_bool(resp['system_prompt_enabled'])}")
 
+        elif cmd.startswith("log requests"):
+            print(f"  log requests {fmt_bool(resp['log_requests'])}")
+
     else:
         print(f"  unknown command {cmd!r} — type 'help' for usage")
 
@@ -130,9 +136,10 @@ def main():
         resp = send("status", args.host, args.port)
         print(f"  anon           {fmt_bool(resp['anon_enabled'])}")
         print(f"  deanon         {fmt_bool(resp['deanon_enabled'])}")
-        print(f"  anxious         {fmt_bool(resp['anxious_enabled'])}")
+        print(f"  anxious        {fmt_bool(resp['anxious_enabled'])}")
         print(f"  save images    {fmt_bool(resp.get('save_images', False))}")
         print(f"  system prompt  {fmt_bool(resp.get('system_prompt_enabled', False))}")
+        print(f"  log requests   {fmt_bool(resp.get('log_requests', False))}")
         print()
     except Exception:
         print("  [warn] proxy not reachable yet — commands will retry\n")

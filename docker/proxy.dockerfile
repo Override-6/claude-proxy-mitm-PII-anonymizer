@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
@@ -10,18 +10,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt .
-# Pip download cache persists across builds — torch/gliner/easyocr won't re-download
+COPY pyproject.toml poetry.lock ./
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install poetry
 
-# Pre-download GLiNER model — HuggingFace cache persists across builds
-RUN --mount=type=cache,target=/root/.cache/huggingface \
-    python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_multi-v2.1')"
+RUN --mount=type=cache,target=/root/.cache/poetry \
+    poetry install
 
 # Pre-download EasyOCR English + French models — EasyOCR uses ~/.EasyOCR by default
 RUN --mount=type=cache,target=/root/.EasyOCR \
-    python -c "import easyocr; easyocr.Reader(['en', 'fr'], gpu=False)"
+    poetry run python -c "import easyocr; easyocr.Reader(['en', 'fr'], gpu=False)"
 
 COPY . .
 
@@ -30,7 +28,7 @@ EXPOSE 8080
 # mitmproxy cert + state persisted via volume
 VOLUME ["/root/.mitmproxy", "/app/cache", "/app/ignore"]
 
-CMD ["mitmdump", \
+CMD ["poetry", "run", "mitmdump", \
      "-s", "src/proxy.py", \
      "--listen-port", "8080", \
      "--listen-host", "0.0.0.0", \

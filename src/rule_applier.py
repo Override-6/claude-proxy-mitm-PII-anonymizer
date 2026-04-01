@@ -13,7 +13,6 @@ import re
 import time
 
 import jq as _jq
-
 from mitmproxy import http
 from mitmproxy.http import Request
 
@@ -25,16 +24,18 @@ from rules import load_rules, RequestRule
 
 mappings = Mappings()
 rules = load_rules()
+text_anonymizer.exempt_words = rules.exempt_words
 
 _IMAGES_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "redacted_images")
 
 # Mutable state shared with the control socket
 state = {
     "anon_enabled": True,
-    "deanon_enabled": False,
+    "deanon_enabled": True,
     "anxious_enabled": True,
     "save_images": True,
     "system_prompt_enabled": True,
+    "log_requests": True,
     "mappings": mappings,
 }
 
@@ -52,7 +53,7 @@ def _log_anonymization_diff(original: str, new_content: str) -> None:
     print(f"[anonymizer] Tokens introduced: {injected}")
     for tok in list(injected)[:10]:
         idx = new_content.find(tok)
-        print(f"[anonymizer] '{tok}' context: ...{new_content[max(0,idx-80):idx+len(tok)+80]}...")
+        print(f"[anonymizer] '{tok}' context: ...{new_content[max(0, idx - 80):idx + len(tok) + 80]}...")
 
 
 def _save_image(image_bytes: bytes, ocr_text: str, image_hash: str) -> None:
@@ -131,6 +132,7 @@ def make_deanon_chunk(sse_fields: list[list[str]] | None):
             text = text_anonymizer.deanonymize_text(text, mappings)
 
         return text.encode("utf-8")
+
     return deanon_chunk
 
 
@@ -226,7 +228,8 @@ async def _anonymize_recursive(value):
     if isinstance(value, list):
         return [await _anonymize_recursive(item) for item in value]
     if isinstance(value, dict):
-        handler = _BLOCK_HANDLERS.get(value.get("type"))
+        type_field = value.get("type", None)
+        handler = _BLOCK_HANDLERS.get(type_field, None) if type_field and isinstance(type_field, str) else None
         if handler:
             return await handler(value)
         return {k: await _anonymize_recursive(v) for k, v in value.items()}
@@ -282,7 +285,7 @@ async def _block_document(block: dict) -> dict:
 
 async def _block_tool_use(block: dict) -> dict:
     """{"type":"tool_use", "input": {...}}  — anonymize the input object."""
-    return {**block, "input": await _anonymize_recursive(block.get("input") or {})}
+    return {**block, "input": await _anonymize_recursive(block.get("input") or {}, "")}
 
 
 async def _block_tool_result(block: dict) -> dict:
@@ -303,13 +306,13 @@ async def _block_skip(block: dict) -> dict:
 
 
 _BLOCK_HANDLERS = {
-    "text":               _block_text,
-    "image":              _block_image,
-    "document":           _block_document,
-    "tool_use":           _block_tool_use,
-    "tool_result":        _block_tool_result,
-    "thinking":           _block_skip,
-    "redacted_thinking":  _block_skip,
+    "text": _block_text,
+    "image": _block_image,
+    "document": _block_document,
+    "tool_use": _block_tool_use,
+    "tool_result": _block_tool_result,
+    "thinking": _block_skip,
+    "redacted_thinking": _block_skip,
 }
 
 
@@ -600,6 +603,72 @@ async def apply_request_rules(flow: http.HTTPFlow, request_rules: list[RequestRu
             {"Content-Type": "text/plain"},
         )
     return True
+
+
+def apply_mcp_request_rules(flow: http.HTTPFlow, mcp_rules: list[RequestRule]) -> bool:
+    """Deanonymize the request body before it reaches the MCP server.
+
+    Claude sends [TYPE_N] tokens; the MCP server needs the real values to
+    perform meaningful work (e.g. search Gmail for a real name).
+    Only runs when anon_enabled is True (same master switch as anonymization).
+    """
+    url = flow.request.pretty_url.split("?")[0]
+    matched_rule = next((r for r in mcp_rules if r.url_pattern.fullmatch(url)), None)
+    if not matched_rule:
+        return False
+
+    raw = flow.request.get_content()
+    if not raw:
+        return True
+
+    try:
+        body = json.loads(raw)
+        body = _apply_deanon_paths(body, matched_rule.sensitive_fields)
+        body = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        flow.request.set_content(body)
+        with open("data/last_mcp_call.json", "wb") as f:
+            f.write(body)
+        print(f"[mcp] Deanonymized request → {url}")
+    except Exception as e:
+        print(f"[mcp] ERROR deanonymizing request for {url}: {e}")
+        flow.response = http.Response.make(
+            502, f"MCP proxy deanonymization failed: {e}", {"Content-Type": "text/plain"}
+        )
+    return True
+
+
+async def apply_mcp_response_rules(flow: http.HTTPFlow, mcp_rules: list[RequestRule]) -> bool:
+    """Anonymize the MCP server response before it reaches Claude.
+
+    Tool results may contain real PII (names, emails, …); re-mask them so
+    Claude only ever sees [TYPE_N] tokens, keeping the conversation clean.
+    Only runs when anon_enabled is True.
+    """
+    if not state["anon_enabled"] or not mcp_rules:
+        return False
+
+    url = flow.request.pretty_url.split("?")[0]
+    matched_rule = next((r for r in mcp_rules if r.url_pattern.fullmatch(url)), None)
+    if not matched_rule:
+        return False
+
+    content = flow.response.get_content()
+    if not content:
+        return True
+
+    content_type = flow.response.headers.get("content-type", "")
+    if "application/json" not in content_type:
+        return True
+
+    try:
+        body = json.loads(content)
+        body = await _apply_paths(body, matched_rule.sensitive_fields)
+        flow.response.set_content(json.dumps(body, ensure_ascii=False).encode("utf-8"))
+        print(f"[mcp] Anonymized response ← {url}")
+    except Exception as e:
+        print(f"[mcp] ERROR anonymizing response for {url}: {e}")
+    return True
+
 
 def apply_response_rules(flow: http.HTTPFlow, response_rules: list[RequestRule]):
     if not state["deanon_enabled"]:
