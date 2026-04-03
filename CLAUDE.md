@@ -71,8 +71,7 @@ console.py ──TCP:9999──► control_socket.py  (runtime toggles)
         ├── regex_finder.py       # EMAIL and PHONE via compiled regex
         ├── presidio_finder.py    # Presidio structured PII (email, phone, IBAN, SSN, IP…)
         ├── mappings_finder.py    # Re-detects previously-seen entities (FlashText)
-        ├── gliner_finder.py      # GLiNER multilingual NER (PERSON, ORG, LOC)
-        └── ner_finder.py         # spaCy NER (kept for reference, not active)
+        └── ner_finder.py         # NER (PERSON, ORG, LOC) — English model (distilbert-base-uncased-finetuned-conll03)
 ```
 
 ---
@@ -93,7 +92,7 @@ console.py ──TCP:9999──► control_socket.py  (runtime toggles)
 ### Entity detection priority (text)
 Finders run in order; later-finder entities that overlap an already-accepted span are discarded:
 1. `PresidioEntityFinder` — structured PII: EMAIL, PHONE, IBAN, SSN, IP, credit card
-2. `NEREntityFinder` — GLiNER multilingual NER: PERSON, ORG, LOC
+2. `NEREntityFinder` — English NER (distilbert-base-uncased-finetuned-conll03): PERSON, ORG, LOC
 3. `MappingsEntityFinder` — catches previously-seen entities missed by the above
 
 ### Response deanonymization (Claude API)
@@ -267,11 +266,12 @@ GOOGLE_OAUTH_CLIENT_SECRET=...
 |---|---|---|
 | `mitmproxy` | HTTPS proxy framework | Hooks in proxy.py; dual-mode (forward + reverse) |
 | `presidio-analyzer` | Structured PII detection | EMAIL, PHONE, IBAN, SSN, IP, credit card |
-| `gliner` (`urchade/gliner_multi-v2.1`) | Multilingual NER | Lazy-loaded; ~400MB; handles EN/FR/DE/ES/etc. |
+| `transformers` (`elastic/distilbert-base-uncased-finetuned-conll03-english`) | English NER | Active in `ner_finder.py`; detects PERSON, [LOC_29], LOC |
+| `gliner` (`urchade/gliner_multi-v2.1`) | Multilingual NER | Cached locally; not yet wired in |
 | `easyocr` | OCR for image redaction | Singleton; English only; CPU mode |
 | `pydivert` | WinDivert bindings | Windows + admin only; used by proxifier.py |
 | `Pillow` | Image draw/redaction | |
-| `torch` | Backend for GLiNER + EasyOCR | Threaded: `set_num_threads(cpu_count)` |
+| `torch` | Backend for NER + EasyOCR | Threaded: `set_num_threads(cpu_count)` |
 
 ---
 

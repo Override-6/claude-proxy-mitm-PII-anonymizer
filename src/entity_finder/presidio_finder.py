@@ -8,9 +8,10 @@ Replaces hand-rolled regex patterns with production-grade recognizers.
 
 from __future__ import annotations
 
+import re
 from typing import List
 
-from presidio_analyzer import AnalyzerEngine, RecognizerResult
+from presidio_analyzer import AnalyzerEngine, BatchAnalyzerEngine, RecognizerResult
 
 from mappings import Mappings
 from . import AbstractEntityFinder, Entity
@@ -47,6 +48,10 @@ _IGNORE_IPS = frozenset({
 # Minimum confidence score to accept a Presidio result.
 _MIN_SCORE = 0.4
 
+# All structured PII Presidio detects (email, phone, CC, IBAN, SSN, IP) requires
+# either an '@' or at least one digit.  Texts with neither can be skipped entirely.
+_STRUCTURED_PII_CHARS = re.compile(r'[@\d]')
+
 
 def _build_analyzer() -> AnalyzerEngine:
     """Build a Presidio AnalyzerEngine with optional custom recognizers."""
@@ -73,6 +78,7 @@ class PresidioEntityFinder(AbstractEntityFinder):
     def __init__(self) -> None:
         print("Loading Presidio analyzer...")
         self._analyzer = _build_analyzer()
+        self._batch_analyzer = BatchAnalyzerEngine(self._analyzer)
         self._entities = _ENTITIES + ["FR_NIR"]
         print("Presidio analyzer loaded!")
 
@@ -99,3 +105,23 @@ class PresidioEntityFinder(AbstractEntityFinder):
             language="en",
         )
         return self._to_entities(results, text)
+
+    def find_entities_batch(self, texts: List[str], mappings: Mappings) -> List[List[Entity]]:
+        if not texts:
+            return []
+        # Pre-filter: skip texts that cannot possibly contain structured PII.
+        # All recognizers (email, phone, credit card, IBAN, SSN, IP) require '@' or digits.
+        candidate_indices = [i for i, t in enumerate(texts) if _STRUCTURED_PII_CHARS.search(t)]
+        if not candidate_indices:
+            return [[] for _ in texts]
+        candidate_texts = [texts[i] for i in candidate_indices]
+        batch_results = self._batch_analyzer.analyze_iterator(
+            candidate_texts,
+            language="en",
+            entities=self._entities,
+            batch_size=32,
+        )
+        out: List[List[Entity]] = [[] for _ in texts]
+        for idx, results in zip(candidate_indices, batch_results):
+            out[idx] = self._to_entities(results, texts[idx])
+        return out

@@ -11,16 +11,14 @@ from __future__ import annotations
 
 import pathlib
 import pytest
+import torch
 from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification
 
 # ---------------------------------------------------------------------------
 # Model path
 # ---------------------------------------------------------------------------
 
-_MODEL_DIR = str(
-    pathlib.Path(__file__).parent.parent / "models" / "bert-multilingual-uncased-ner"
-)
-
+_MODEL = "models/xlm-roberta-ner"
 # WikiANN label names after aggregation_strategy="simple"
 # B-PER / I-PER → entity_group "PER", etc.
 PER = "PER"
@@ -35,14 +33,14 @@ LOC = "LOC"
 
 @pytest.fixture(scope="session")
 def ner_pipe():
-    tokenizer = AutoTokenizer.from_pretrained(_MODEL_DIR)
-    model = AutoModelForTokenClassification.from_pretrained(_MODEL_DIR)
+    tokenizer = AutoTokenizer.from_pretrained(_MODEL)
+    model = AutoModelForTokenClassification.from_pretrained(_MODEL)
     return pipeline(
         "ner",
         model=model,
         tokenizer=tokenizer,
-        aggregation_strategy="simple",
-        device=-1,  # CPU; change to 0 for GPU
+        aggregation_strategy="first",
+        device=0 if torch.cuda.is_available() else -1,
     )
 
 
@@ -134,6 +132,7 @@ class TestEnglishEdgeCases:
 
     def test_single_word_location(self, ner_pipe):
         results = _entities(ner_pipe, "London is an amazing city to visit.")
+        print(results)
         assert _find(results, "London", LOC), f"Expected LOC 'London' in {results}"
 
     def test_no_entities(self, ner_pipe):

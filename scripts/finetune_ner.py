@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import datasets as _datasets_mod
+
 _datasets_mod.disable_caching()  # Prevent stale cached intermediate remaps from poisoning the pipeline.
 from datasets import ClassLabel, Dataset, Sequence, concatenate_datasets, load_dataset
 from transformers import (
@@ -57,9 +58,9 @@ _TARGET_NER_FEATURE = Sequence(ClassLabel(names=LABEL_LIST))
 # OntoNotes5 uses PERSON/GPE instead of PER/LOC — explicit remap needed.
 _ONTONOTES_REMAP = {
     "B-PERSON": "B-PER", "I-PERSON": "I-PER",
-    "B-GPE":    "B-LOC", "I-GPE":    "I-LOC",   # geo-political entity → LOC
-    "B-ORG":    "B-ORG", "I-ORG":    "I-ORG",
-    "B-LOC":    "B-LOC", "I-LOC":    "I-LOC",
+    "B-GPE": "B-LOC", "I-GPE": "I-LOC",  # geo-political entity → LOC
+    "B-ORG": "B-ORG", "I-ORG": "I-ORG",
+    "B-LOC": "B-LOC", "I-LOC": "I-LOC",
     "O": "O",
     # everything else (DATE, CARDINAL, MONEY, …) → O implicitly via .get default
 }
@@ -92,9 +93,11 @@ def _normalize_dataset(ds, name_remap: dict | None = None):
         # Babelscape/multinerd).  Their first 7 IDs happen to match our scheme
         # (0=O, 1=B-PER, …, 6=I-LOC); anything ≥ 7 (MISC, ANIM, …) maps to O.
         _n = len(LABEL_LIST)
+
         def _clamp(example):
             example["ner_tags"] = [t if t < _n else 0 for t in example["ner_tags"]]
             return example
+
         ds = ds.map(_clamp, desc="Clamping OOB labels")
         return ds.select_columns(["tokens", "ner_tags"])
 
@@ -251,18 +254,17 @@ def _load_ontonotes5(split: str):
 # Strip string literals AND comments — both can contain real prose with names.
 # Order matters: strip multi-line strings before single-line, then comments.
 _STRIP_RE = re.compile(
-    r'"""[\s\S]*?"""|'          # triple-double-quoted strings
-    r"'''[\s\S]*?'''|"          # triple-single-quoted strings
+    r'"""[\s\S]*?"""|'  # triple-double-quoted strings
+    r"'''[\s\S]*?'''|"  # triple-single-quoted strings
     r'"[^"\\\n]*(?:\\.[^"\\\n]*)*"|'  # double-quoted strings
     r"'[^'\\\n]*(?:\\.[^'\\\n]*)*'|"  # single-quoted strings
-    r"#[^\n]*|"                  # single-line comments (#...)
-    r"//[^\n]*|"                  # single-line comments (//...)
-    r"/\*[\s\S\n]*\*/",                  # multi-line comments (//...)
+    r"#[^\n]*|"  # single-line comments (#...)
+    r"//[^\n]*|"  # single-line comments (//...)
+    r"/\*[\s\S\n]*\*/",  # multi-line comments (//...)
     re.DOTALL,
 )
 # Extract identifier-like tokens (no digits-only, no single chars)
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,}")
-
 
 _CODE_LANGUAGES = ["python", "java", "javascript", "go", "ruby", "php"]
 
@@ -479,12 +481,12 @@ def _make_synthetic_positives(n: int, rng: random.Random) -> Dataset:
     FIRST_EN = ["john", "james", "mary", "sarah", "david", "emma", "michael", "lisa",
                 "william", "anna", "robert", "emily", "charles", "kate", "george",
                 "helen", "peter", "diana", "mark", "laura", "kevin", "rachel", "brian"]
-    LAST_FR  = ["martin", "bernard", "thomas", "petit", "robert", "richard", "durand",
-                "dubois", "moreau", "laurent", "simon", "michel", "lefebvre", "leroy",
-                "roux", "david", "bertrand", "morel", "fournier", "girard", "bonnet"]
-    LAST_EN  = ["smith", "jones", "williams", "brown", "taylor", "davies", "wilson",
-                "evans", "johnson", "miller", "anderson", "clark", "thompson", "white",
-                "harris", "hall", "walker", "young", "allen", "king", "wright", "scott"]
+    LAST_FR = ["martin", "bernard", "thomas", "petit", "robert", "richard", "durand",
+               "dubois", "moreau", "laurent", "simon", "michel", "lefebvre", "leroy",
+               "roux", "david", "bertrand", "morel", "fournier", "girard", "bonnet"]
+    LAST_EN = ["smith", "jones", "williams", "brown", "taylor", "davies", "wilson",
+               "evans", "johnson", "miller", "anderson", "clark", "thompson", "white",
+               "harris", "hall", "walker", "young", "allen", "king", "wright", "scott"]
 
     ORGS = [
         ["societe", "generale"],
@@ -524,9 +526,12 @@ def _make_synthetic_positives(n: int, rng: random.Random) -> Dataset:
     # where labels are integer IDs from LABEL2ID.
 
     O = LABEL2ID["O"]
-    B_PER = LABEL2ID["B-PER"]; I_PER = LABEL2ID["I-PER"]
-    B_ORG = LABEL2ID["B-ORG"]; I_ORG = LABEL2ID["I-ORG"]
-    B_LOC = LABEL2ID["B-LOC"]; I_LOC = LABEL2ID["I-LOC"]
+    B_PER = LABEL2ID["B-PER"];
+    I_PER = LABEL2ID["I-PER"]
+    B_ORG = LABEL2ID["B-ORG"];
+    I_ORG = LABEL2ID["I-ORG"]
+    B_LOC = LABEL2ID["B-LOC"];
+    I_LOC = LABEL2ID["I-LOC"]
 
     def _per(first, last):
         return [first, last], [B_PER, I_PER]
@@ -555,7 +560,7 @@ def _make_synthetic_positives(n: int, rng: random.Random) -> Dataset:
 
     def _rand_person():
         pool_f = FIRST_FR if rng.random() < 0.6 else FIRST_EN
-        pool_l = LAST_FR  if rng.random() < 0.6 else LAST_EN
+        pool_l = LAST_FR if rng.random() < 0.6 else LAST_EN
         return rng.choice(pool_f), rng.choice(pool_l)
 
     # Template builders — each returns a full (tokens, labels) pair
@@ -563,26 +568,26 @@ def _make_synthetic_positives(n: int, rng: random.Random) -> Dataset:
         f, l = _rand_person()
         pt, pl = _per(f, l)
         pre = rng.choice(["author", "user", "owner", "contact", "assignee",
-                           "created", "by", "modified", "by", "from"])
+                          "created", "by", "modified", "by", "from"])
         return [pre] + pt, [O] + pl
 
     def tpl_json_org():
         org = rng.choice(ORGS)
         ot, ol = _org(org)
         pre = rng.choice(["company", "organization", "client", "partner",
-                           "employer", "institution", "provider"])
+                          "employer", "institution", "provider"])
         return [pre] + ot, [O] + ol
 
     def tpl_json_location():
         ct, cl = _city()
         pre = rng.choice(["city", "location", "country", "region",
-                           "office", "based", "in", "from"])
+                          "office", "based", "in", "from"])
         return [pre] + ct, [O] + cl
 
     def tpl_json_address():
         at, al = _address()
         pre = rng.choice(["address", "domicile", "livraison", "facturation",
-                           "siege", "social", "at", "located", "at"])
+                          "siege", "social", "at", "located", "at"])
         return [pre] + at, [O] + al
 
     def tpl_sentence_per():
@@ -656,12 +661,12 @@ def _make_synthetic_positives(n: int, rng: random.Random) -> Dataset:
             org = rng.choice(ORGS)
             ot, ol = _org(org)
             mid = rng.choice([["works", "at"], ["employed", "by"],
-                               ["est", "employe", "chez"], ["travaille", "pour"]])
+                              ["est", "employe", "chez"], ["travaille", "pour"]])
             return pt + mid + ot, pl + [O] * len(mid) + ol
         else:
             ct, cl = _city()
             mid = rng.choice([["lives", "in"], ["based", "in"],
-                               ["habite", "a"], ["reside", "a"]])
+                              ["habite", "a"], ["reside", "a"]])
             return pt + mid + ct, pl + [O] * len(mid) + cl
 
     templates = [
@@ -685,7 +690,7 @@ def _make_synthetic_positives(n: int, rng: random.Random) -> Dataset:
 # ---------------------------------------------------------------------------
 
 
-def load_all(split: str, request_file: Path | None = None) -> Dataset:
+def load_all(split: str) -> Dataset:
     parts = []
 
     # --- Positive examples ---
@@ -722,13 +727,6 @@ def load_all(split: str, request_file: Path | None = None) -> Dataset:
     else:
         print("  code negatives (github-code Python, ~500) …")
         ds = _load_code_negatives(5000)
-        if ds is not None:
-            parts.append(ds)
-
-    if request_file is not None:
-        max_req = 2000 if split == "train" else 200
-        print(f"  request negatives ({request_file.name}, max {max_req}) …")
-        ds = _load_request_negatives(request_file, max_examples=max_req)
         if ds is not None:
             parts.append(ds)
 
@@ -865,9 +863,10 @@ def print_label_distribution(dataset, tag: str):
             counts[LABEL_LIST[label_id]] += 1
     total = sum(counts.values())
     print(f"\n--- Label distribution ({tag}, {len(dataset):,} examples) ---")
-    for label in LABEL_LIST:
-        c = counts.get(label, 0)
-        print(f"  {label:6s}: {c:>9,}  ({100 * c / total:.1f}%)")
+    if total > 0:
+        for label in LABEL_LIST:
+            c = counts.get(label, 0)
+            print(f"  {label:6s}: {c:>9,}  ({100 * c / total:.1f}%)")
     print(f"  {'TOTAL':6s}: {total:>9,}")
 
 
@@ -884,33 +883,43 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--output_dir", type=str, default="./models/xlm-roberta-ner")
-    parser.add_argument(
-        "--request_file", type=str, default="./data/requests-sample.jsonl",
-        help="Path to requests-sample.jsonl for real-traffic hard negatives",
-    )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--validate", type=bool, default=False)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    request_file = Path(args.request_file) if args.request_file else None
+
+    validate = args.validate
+
+    if validate:
+        MODEL_NAME = "models/xlm-roberta-ner"
+    else:
+        MODEL_NAME = "FacebookAI/xlm-roberta-base"
 
     print(f"Model        : {MODEL_NAME}")
     print(f"Epochs       : {args.epochs}")
     print(f"Batch size   : {args.batch_size}")
     print(f"LR           : {args.learning_rate}")
     print(f"Output dir   : {args.output_dir}")
-    print(f"Request file : {request_file}")
     print(f"Dry-run      : {args.dry_run}")
+    print(f"Validate      : {args.validate}")
 
     print("\nLoading datasets …")
-    train_raw = load_all("train", request_file=request_file)
-    val_raw = load_all("validation", request_file=request_file)
+    train_raw = Dataset.from_dict({
+        "tokens": [],
+        "ner_tags": []
+    })
+    if not validate:
+        train_raw = load_all("train")
+
+    val_raw = load_all("validation")
     print(f"\nTrain: {len(train_raw):,}  |  Val: {len(val_raw):,}")
     print_label_distribution(train_raw, "train")
 
     print("\nLoading tokenizer and model …")
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForTokenClassification.from_pretrained(
         MODEL_NAME,
@@ -960,8 +969,9 @@ def main():
         compute_metrics=build_compute_metrics(),
     )
 
-    print("\nStarting training …")
-    trainer.train()
+    if not validate:
+        print("\nStarting training …")
+        trainer.train()
 
     if args.dry_run:
         print("\n[dry-run] Done after 1 step.")
@@ -969,7 +979,7 @@ def main():
         show_sample_predictions(model, tokenizer, val_raw, n=3, device=device)
         sys.exit(0)
 
-    print("\nRunning final evaluation …")
+    print("\nRunning evaluation …")
     metrics = trainer.evaluate()
     print(f"Eval metrics: {metrics}")
 

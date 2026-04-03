@@ -8,6 +8,7 @@ Usage:
 """
 
 import sys
+import time
 from pathlib import Path
 
 _SRC = Path(__file__).parent.parent / "src"
@@ -32,7 +33,10 @@ def main():
 
     for text in texts:
         print(f"\nInput : {text}")
+        t0 = time.time()
         entities = finder.find_entities(text, mappings)
+        t1 = time.time()
+        print(f"Completed in {t1 - t0} seconds")
         if not entities:
             print("  (no entities found)")
         else:

@@ -13,6 +13,14 @@ import re
 import time
 
 import jq as _jq
+
+_JQ_PATH_CACHE: dict[str, object] = {}
+
+def _jq_paths(expr: str, data):
+    """Compile and cache jq path expressions to avoid recompilation per request."""
+    if expr not in _JQ_PATH_CACHE:
+        _JQ_PATH_CACHE[expr] = _jq.compile(f'path({expr})')
+    return _JQ_PATH_CACHE[expr].input(value=data).all()
 from mitmproxy import http
 from mitmproxy.http import Request
 
@@ -195,7 +203,7 @@ def _apply_deanon_paths(data, sensitive_fields):
         return _deanonymize_recursive(data)
     for expr in sensitive_fields:
         try:
-            raw_paths = _jq.all(f'path({expr})', data)
+            raw_paths = _jq_paths(expr, data)
         except Exception:
             continue
         for raw_path in raw_paths:
@@ -330,7 +338,7 @@ async def _apply_paths(data, sensitive_fields):
 
     for expr in sensitive_fields:
         try:
-            raw_paths = _jq.all(f'path({expr})', data)
+            raw_paths = _jq_paths(expr, data)
         except Exception:
             continue
         for raw_path in raw_paths:
@@ -391,7 +399,7 @@ def _collect_texts_for_fields(data, sensitive_fields) -> list[str]:
     texts = []
     for expr in sensitive_fields:
         try:
-            raw_paths = _jq.all(f'path({expr})', data)
+            raw_paths = _jq_paths(expr, data)
         except Exception:
             continue
         for raw_path in raw_paths:

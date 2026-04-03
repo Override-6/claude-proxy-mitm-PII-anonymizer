@@ -5,6 +5,7 @@ PII detection using GLiNER (multilingual) + regex for realtime proxy use.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import re
 from datetime import datetime, timezone
@@ -29,11 +30,11 @@ _entity_cache_hits: dict[str, int] = {}
 
 # Priority order: finders earlier in the list win on overlapping spans.
 # Presidio handles structured PII (email, phone, credit card, IBAN, SSN, IP).
-# GLiNER handles semantic NER (person names, organizations, locations).
+# LangNERFinder routes to distilbert (EN) or GLiNER-multi (FR/other) for semantic NER.
 # MappingsEntityFinder catches any previously-seen entities missed above.
 _entity_finders = [
     PresidioEntityFinder(),
-    NEREntityFinder(),
+    # NEREntityFinder(),
     MappingsEntityFinder()
 ]
 
@@ -158,13 +159,15 @@ async def prewarm_cache(texts: List[str], mappings: Mappings) -> None:
     Already-cached texts are skipped so repeated calls are cheap.
     """
     clean_texts: List[str] = []
+    seen: set[str] = set()
     for text in texts:
         if not text.strip():
             continue
         if REDACTED_REGEX.fullmatch(text):
             continue
         clean, _ = _strip_exempt_markers(text)
-        if clean.strip() and clean not in _entity_cache:
+        if clean.strip() and clean not in _entity_cache and clean not in seen:
+            seen.add(clean)
             clean_texts.append(clean)
 
     if not clean_texts:
@@ -173,11 +176,18 @@ async def prewarm_cache(texts: List[str], mappings: Mappings) -> None:
     per_text_accepted: list[list[Entity]] = [[] for _ in clean_texts]
 
     def _run_sequential():
-        # Run each finder in order and commit new entities to mappings.kp between
-        # finders so that MappingsEntityFinder can find entities detected earlier.
-        for finder in _entity_finders:
-            batch_results = finder.find_entities_batch(clean_texts, mappings)
-            for i, entities in enumerate(batch_results):
+        # Run the first two finders (Presidio + NER) concurrently — they are independent
+        # and PyTorch releases the GIL during inference, allowing real overlap.
+        # MappingsEntityFinder runs last (needs mappings populated by the first two).
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(f.find_entities_batch, clean_texts, mappings)
+                for f in _entity_finders[:2]
+            ]
+            pairwise_results = [f.result() for f in futures]
+
+        for finder_results in pairwise_results:
+            for i, entities in enumerate(finder_results):
                 for entity in entities:
                     if _is_exempt(entity):
                         continue
@@ -187,6 +197,17 @@ async def prewarm_cache(texts: List[str], mappings: Mappings) -> None:
                     if _no_overlap(entity, accepted):
                         accepted.append(entity)
                         mappings.get_or_set_redacted_text(entity.text, entity.type)
+
+        # MappingsEntityFinder runs after mappings are populated by the above two
+        for i, entities in enumerate(_entity_finders[2].find_entities_batch(clean_texts, mappings)):
+            for entity in entities:
+                if _is_exempt(entity):
+                    continue
+                if REDACTED_REGEX.fullmatch(entity.text):
+                    continue
+                if _no_overlap(entity, per_text_accepted[i]):
+                    per_text_accepted[i].append(entity)
+                    mappings.get_or_set_redacted_text(entity.text, entity.type)
 
     async with _scan_sem:
         await asyncio.to_thread(_run_sequential)
