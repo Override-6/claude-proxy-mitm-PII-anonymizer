@@ -37,6 +37,8 @@ services:
       - ./src:/app/src
       # All /app/data output (redacted images, request log, …)
       - ./data:/app/data
+      # Fine-tuned NER models
+      - ./models:/app/models
     environment:
       - PYTHONUNBUFFERED=1
     depends_on:

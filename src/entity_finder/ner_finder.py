@@ -1,13 +1,11 @@
 """
 Supervised NER entity finder (case-insensitive).
 
-Uses elastic/distilbert-base-uncased-finetuned-conll03-english as an interim
-model while a multilingual uncased model is being fine-tuned.  Because the
-tokenizer is uncased (do_lower_case=True), capitalization is invisible to the
-model — "charlie kirk" and "Charlie Kirk" are detected identically.
+Input text is lowercased before being passed to the model to match the
+lowercased training distribution.  Character offsets are unchanged by
+lower(), so span extraction against the original text is still correct.
 
-To switch to the fine-tuned multilingual model later, update _MODEL_NAME and
-_LABEL_MAP (if label names differ).
+To switch models: update _MODEL_NAME.
 """
 
 from __future__ import annotations
@@ -15,23 +13,22 @@ from __future__ import annotations
 from typing import List
 
 import torch
-from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification
+from transformers import AutoModelForTokenClassification, AutoTokenizer, pipeline
 
 from mappings import Mappings
 from . import AbstractEntityFinder, Entity
 
-_MODEL_NAME = "elastic/distilbert-base-uncased-finetuned-conll03-english"
+_MODEL_NAME = "models/xlm-roberta-ner"
 
 _LABEL_MAP = {
-    "PER": "PERSON",
-    "ORG": "ORG",
-    "LOC": "LOC",
+    "PER": "PERSON", "B-PER": "PERSON", "I-PER": "PERSON",
+    "ORG": "ORG",    "B-ORG": "ORG",    "I-ORG": "ORG",
+    "LOC": "LOC",    "B-LOC": "LOC",    "I-LOC": "LOC",
 }
 
-_MIN_ENTITY_CHARS = 3
+_MIN_ENTITY_CHARS = 4
 _MAX_ENTITY_CHARS = 50
-
-_ORG_BLACKLIST = frozenset(["CAT"])
+_MIN_SCORE = 0.80
 
 
 class NEREntityFinder(AbstractEntityFinder):
@@ -44,7 +41,7 @@ class NEREntityFinder(AbstractEntityFinder):
             "ner",
             model=model,
             tokenizer=tokenizer,
-            aggregation_strategy="simple",
+            aggregation_strategy="first",
             device=0 if torch.cuda.is_available() else -1,
         )
         print(f"NER model loaded! ({model_name})")
@@ -53,25 +50,29 @@ class NEREntityFinder(AbstractEntityFinder):
         seen: set[tuple[int, int]] = set()
         result: List[Entity] = []
         for g in groups:
+            if g.get("score", 1.0) < _MIN_SCORE:
+                continue
             label = _LABEL_MAP.get(g["entity_group"])
             if label is None:
                 continue
             s = g["start"]
             e = g["end"]
-            # Entity must sit at word boundaries in the original text.
+            # Must sit at word boundaries in the original text.
             if s > 0 and text[s - 1].isalnum():
                 continue
             if e < len(text) and text[e].isalnum():
+                continue
+            # Skip if immediately adjacent to _ or . (part of an identifier or path)
+            if s > 0 and text[s - 1] in ("_", "."):
+                continue
+            if e < len(text) and text[e] in ("_", "."):
                 continue
             start = s + text_offset
             end = e + text_offset
             span_text = text[s:e].strip()
             if not span_text or not (_MIN_ENTITY_CHARS <= len(span_text) <= _MAX_ENTITY_CHARS):
                 continue
-            # Skip already-redacted text
             if span_text.startswith(f"{label}_"):
-                continue
-            if label == "ORG" and span_text.upper() in _ORG_BLACKLIST:
                 continue
             key = (start, end)
             if key in seen:
@@ -81,14 +82,13 @@ class NEREntityFinder(AbstractEntityFinder):
         return result
 
     def find_entities(self, text: str, mappings: Mappings) -> List[Entity]:
-        groups = self._pipe(text)
+        groups = self._pipe(text.lower())
         return self._to_entities(groups, text)
 
     def find_entities_batch(self, texts: List[str], mappings: Mappings = None) -> List[List[Entity]]:
         if not texts:
             return []
-        results = self._pipe(texts)
-        # pipe returns a flat list for single input, list of lists for multiple
+        results = self._pipe([t.lower() for t in texts])
         if texts and results and not isinstance(results[0], list):
             results = [results]
         return [self._to_entities(groups, text) for groups, text in zip(results, texts)]

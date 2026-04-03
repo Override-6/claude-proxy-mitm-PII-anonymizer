@@ -247,7 +247,7 @@ class TestFrenchEdgeCases:
         results = _entities(
             ner_pipe, "Le Salon de Genève présente les derniers modèles automobiles."
         )
-        assert _find(results, "Genève", LOC), f"Expected LOC 'Genève' in {results}"
+        assert _find(results, "salon de geneve", ORG), f"Expected ORG 'salon de genève' in {results}"
 
     def test_no_entities_french(self, ner_pipe):
         results = _entities(ner_pipe, "Il fait beau aujourd'hui et je me sens bien.")

@@ -3,7 +3,7 @@
 # Run as root (sudo).
 set -euo pipefail
 
-CERT_SRC="/srv/Projects/freelance/mateo/claude-pii-proxy/data/mitmproxy/mitmproxy-ca-cert.pem"
+CERT_SRC="data/mitmproxy/mitmproxy-ca-cert.pem"
 CERT_DST="/usr/local/share/ca-certificates/mitmproxy-ca.crt"
 
 if [[ ! -f "$CERT_SRC" ]]; then

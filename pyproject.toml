@@ -16,6 +16,8 @@ presidio-analyzer = ">=2.2"
 jq = ">=1.6.0"
 numpy = ">=2.0.0"
 pyahocorasick = "^2.3.0"
+transformers = {extras = ["torch"], version = "^5.4.0"}
+pytest = "^9.0.2"
 
 [tool.poetry.group.training.dependencies]
 datasets = ">=4.0.0"
