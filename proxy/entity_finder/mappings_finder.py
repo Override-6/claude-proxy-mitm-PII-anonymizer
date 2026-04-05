@@ -1,7 +1,7 @@
 from typing import List, Generator
 
-from proxy.mappings import Mappings
-from proxy.entity_finder import AbstractEntityFinder, Entity
+from ..mappings import Mappings
+from . import AbstractEntityFinder, Entity
 
 
 class MappingsEntityFinder(AbstractEntityFinder):

@@ -12,7 +12,7 @@ from typing import List, Generator
 
 from presidio_analyzer import AnalyzerEngine, BatchAnalyzerEngine, RecognizerResult
 
-from proxy.mappings import Mappings
+from ..mappings import Mappings
 from . import AbstractEntityFinder, Entity
 
 # Entity types to detect.  Presidio supports dozens — we pick the ones relevant

@@ -16,7 +16,7 @@ from typing import List, Generator
 import torch
 from transformers import AutoModelForTokenClassification, AutoTokenizer, pipeline
 
-from proxy.mappings import Mappings
+from ..mappings import Mappings
 from . import AbstractEntityFinder, Entity
 
 _MODEL_NAME = "Babelscape/wikineural-multilingual-ner"

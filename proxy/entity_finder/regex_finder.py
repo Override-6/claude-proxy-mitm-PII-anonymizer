@@ -1,7 +1,7 @@
 from re import Pattern
 from typing import List, Tuple
 
-from proxy.mappings import Mappings
+from ..mappings import Mappings
 from . import AbstractEntityFinder, Entity
 
 
