@@ -1,283 +1,269 @@
-# Claude MITM Proxy — Codebase Guide
+# Claude MITM Proxy — PII Anonymizer
 
-## Project Purpose
-
-A MITM proxy that intercepts Claude Desktop / Claude Code HTTPS traffic to anonymize PII in outgoing requests and deanonymize placeholders in responses. Also acts as a reverse proxy in front of local MCP servers, deanonymizing tool call arguments and re-anonymizing tool results.
-
-Runs in Docker. On Windows, WinDivert (`proxifier.py`) provides transparent kernel-level interception; on Linux/Mac, configure the system or application HTTP proxy to point at port 8080.
-
----
+A mitmproxy-based HTTPS proxy that sits between Claude Desktop (or any Anthropic API client) and the Anthropic API. It anonymizes PII in outgoing requests and deanonymizes placeholder tokens in incoming responses, so Claude never sees real sensitive data.
 
 ## Architecture
 
 ```
-Claude Desktop / Claude Code
-     │ HTTPS :443
+Claude Desktop
+     │ HTTPS  (port 8080)
      ▼
-proxifier.py  (WinDivert NAT — Windows kernel intercept)
-     │ CONNECT tunnel
-     ▼
-mitmproxy :8080  (forward proxy — Claude API traffic)
+┌─────────────────────────────────────┐
+│   claude-mitm-proxy (mitmproxy)     │  ← docker/proxy.dockerfile
+│   proxy/main.py                     │
+│                                     │
+│  • anonymize request                │  PII → [PERSON_0], [EMAIL_1], …
+│  • deanonymize response             │  [PERSON_0] → real value
+│  • run NER entity detection         │
+└─────────────────────────────────────┘
      │
-     ├── request hook ──► rule_applier.apply_mcp_request_rules()   ← deanon MCP args first
-     │                ──► rule_applier.apply_request_rules()
-     │                        ├── text_anonymizer  (NER + regex)
-     │                        ├── image_anonymizer (OCR + redaction)
-     │                        └── claude_system_prompt (inject)
-     │
-     └── response hook ─► rule_applier.apply_mcp_response_rules()  ← anon MCP results
-                       ─► rule_applier.apply_response_rules()
-                              └── deanon_chunk (SSE streaming)
-
-mitmproxy :8001  (reverse proxy — MCP server traffic)
-     │ deanon request → forward to google-workspace-mcp:8000 → anon response
      ▼
-google-workspace-mcp :8000
+Anthropic API / claude.ai
 
-console.py ──TCP:9999──► control_socket.py  (runtime toggles)
+     ┌────────────────────────────────┐
+     │  google-workspace-mcp          │  ← MCP reverse proxy (port 8000)
+     │  (reverse proxy to MCP server)  │  deanon args → MCP, re-anon results
+     └────────────────────────────────┘
+
+┌────────────────────────────────────────┐
+│   validator (background service)       │  ← docker/validator.dockerfile
+│                                        │
+│  • Read: data/requests-sample.jsonl    │  Run weekly or manually
+│  • Evaluate: WikiNEural vs Gemma 4 LLM │
+│  • Collect: disagreements dataset      │
+│  • Fine-tune: new NER model            │
+│  • Test: baseline vs fine-tuned        │
+│  • Keep: best-performing model         │
+└────────────────────────────────────────┘
 ```
 
----
+### Key files — Proxy Service
 
-## File Layout
+| File | Purpose |
+|------|---------|
+| `proxy/main.py` | mitmproxy hooks: `request`, `responseheaders`, `response` |
+| `proxy/engine.py` | Core anonymize/deanonymize logic, jq path expansion, SSE streaming |
+| `proxy/rules.py` | JSONC parser + dataclasses for `assets/rules.jsonc` |
+| `assets/rules.jsonc` | URL pattern rules — which fields to anonymize/deanonymize per endpoint |
+| `proxy/entity_finder/` | PII detectors: Presidio (structured PII), NER (names/orgs/locs), Mappings (re-detection) |
+| `proxy/image_anonymizer.py` | OCR → entity detection → black-box redaction for images |
+| `proxy/cache.py` | In-process entity cache (keyed by text, pruned every 12 h) |
+| `proxy/mappings.py` | Bidirectional token ↔ value store, Aho-Corasick automaton for re-detection |
+| `proxy/anxious_filter.py` | Post-anonymization check — warns if known sensitive values leaked through |
+| `proxy/claude_system_prompt.py` | Injects `assets/SYSTEM_PROMPT.md` into every `/v1/messages` request |
+| `proxy/control_socket.py` | TCP socket on port 9999 for runtime commands (`dump`, `clear`) |
 
-```
-├── CLAUDE.md
-├── SYSTEM_PROMPT.md              # Injected into every /v1/messages request
-├── rules.json                    # Declarative URL + jq-path anonymization rules
-├── console.py                    # Interactive CLI (connects via TCP to proxy)
-├── docker-compose.yml            # mitm-proxy + google-workspace-mcp services
-├── Dockerfile                    # mitm-proxy image
-├── docker/
-│   └── google-workspace-mcp/
-│       └── Dockerfile            # Clones + runs taylorwilsdon/google_workspace_mcp
-├── start.bat                     # Windows launcher: mitmproxy + proxifier + Claude Desktop
-├── scripts/
-│   ├── push_saved_request.py     # Benchmark: replay saved requests through the anon pipeline
-│   └── finetune_ner.py
-└── src/
-    ├── proxy.py                  # mitmproxy hooks (thin — delegates everything)
-    ├── rule_applier.py           # Core pipeline: anonymize requests, deanon responses, MCP rules
-    ├── rules.py                  # rules.json loader + jq path parser
-    ├── text_anonymizer.py        # Entity detection → placeholder substitution
-    ├── image_anonymizer.py       # EasyOCR → entity detect → black-box redaction
-    ├── claude_system_prompt.py   # SYSTEM_PROMPT.md injection
-    ├── mappings.py               # Bidirectional PII ↔ [TYPE_N] token store
-    ├── control_socket.py         # TCP command handler (state toggles)
-    ├── event_socket.py           # UDP broadcast to viewer (audit events)
-    ├── viewer.py                 # Listens on :8080, logs to ignore/events.jsonl
-    └── entity_finder/
-        ├── __init__.py           # Entity dataclass + AbstractEntityFinder
-        ├── regex_finder.py       # EMAIL and PHONE via compiled regex
-        ├── presidio_finder.py    # Presidio structured PII (email, phone, IBAN, SSN, IP…)
-        ├── mappings_finder.py    # Re-detects previously-seen entities (FlashText)
-        └── ner_finder.py         # NER (PERSON, ORG, LOC) — English model (distilbert-base-uncased-finetuned-conll03)
-```
+### Key files — Validator Service
 
----
+| File | Purpose |
+|------|---------|
+| `validator/main.py` | Orchestration: `--collect`, `--finetune`, `--test`, `--all` |
+| `validator/evaluator.py` | Use Gemma 4 8B to validate WikiNEural predictions on request data |
+| `validator/dataset_builder.py` | Consolidate disagreements into CoNLL-format training data (80/20 split) |
+| `validator/trainer.py` | Fine-tune WikiNEural model on collected disagreements |
+| `validator/tester.py` | Evaluate baseline and fine-tuned models, keep better, delete worse |
+| `tests/validator/` | Unit tests for dataset quality, evaluator logic, disagreement scoring |
 
-## Key Data Flows
+### Entity finders (run in order)
 
-### Request anonymization (Claude API)
-1. URL matched against `rules.json` `request_rules`
-2. Body dispatched by content-type:
-   - JSON → `_apply_rule_json` → `_apply_paths` (jq-guided)
-   - Multipart → `_apply_rule_multipart` (per-part dispatch)
-   - Form-urlencoded → `_apply_rule_urlencoded`
-3. Text fields → `text_anonymizer.anonymize_text`
-4. Image fields → `image_anonymizer.anonymize_image`
-5. `claude_system_prompt.inject` appended after anonymization
-6. **Any exception → 502, request never forwarded**
+1. **PresidioEntityFinder** — emails, phones, credit cards, IBANs, SSNs, IPs (Microsoft Presidio)
+2. **NEREntityFinder** — persons, organizations, locations (Babelscape wikineural multilingual NER)
+3. **MappingsEntityFinder** — re-detects previously anonymized values using Aho-Corasick (always runs, separate from `finders` list)
 
-### Entity detection priority (text)
-Finders run in order; later-finder entities that overlap an already-accepted span are discarded:
-1. `PresidioEntityFinder` — structured PII: EMAIL, PHONE, IBAN, SSN, IP, credit card
-2. `NEREntityFinder` — English NER (distilbert-base-uncased-finetuned-conll03): PERSON, ORG, LOC
-3. `MappingsEntityFinder` — catches previously-seen entities missed by the above
+## Running
 
-### Response deanonymization (Claude API)
-- **SSE streaming**: `deanon_chunk` callback parses each `data:` JSON line, replaces `[TYPE_N]` tokens at targeted jq paths
-- **Non-streaming**: `apply_response_rules` parses full JSON, walks paths, replaces tokens
-- Unknown tokens (not in mappings) pass through unchanged — never crash
-
-### MCP reverse proxy flow (port 8001)
-Traffic from Claude Desktop/Code to the MCP server goes through port 8001:
-1. **Request** → `apply_mcp_request_rules`: deanonymize `[TYPE_N]` tokens → real values before the MCP server sees them (so searches/lookups work)
-2. Forward to `google-workspace-mcp:8000`
-3. **Response** → `apply_mcp_response_rules`: anonymize real PII in tool results → tokens before Claude sees them
-
-Both steps use the same `Mappings` object as the forward proxy (shared in-process).
-
-Rules for MCP URLs live under `"mcp_rules"` in `rules.json`.
-
-### Anxious filter
-Runs after anonymization on URLs in `anxiety_watchlist`. Checks the post-anonymization body for any known-sensitive entity still present (via `MappingsEntityFinder`). Returns 403 if any unredacted entity is found.
-- Whitelist: `CLAUDE`, `CLAUDE CODE`, `CLAUDE COWORK`, `ANTHROPIC`
-- `{{...}}` exempt spans are stripped from the body before the check — entities inside exempt markers never trigger the filter
-
-### Image OCR pipeline
-1. Hash image bytes (SHA256) → check `cache/images/{hash}.json`
-2. Cache miss: EasyOCR → group regions into lines → smart merge → entity detection → save cache
-3. Cache hit: skip OCR + NER entirely
-4. Redaction: precise per-character bbox → black rectangle → white label
-
----
-
-## Configuration
-
-### rules.json
-```json
-{
-  "exempt_words":       ["claude", ...],
-  "anxiety_watchlist":  ["(api|a-api)\\.anthropic\\.com", ...],
-  "blocked_urls":       [{ "url_pattern": "regex" }],
-  "request_rules": [
-    {
-      "url_pattern": "regex",
-      "sensitive_fields": [".messages[].content[].text", ...] | true
-    }
-  ],
-  "response_rules": [
-    {
-      "url_pattern": "regex",
-      "sensitive_fields": [...],
-      "sse_fields": [".delta.text", ...]
-    }
-  ],
-  "mcp_rules": [
-    {
-      "url_pattern": "http://[^/]+:8001/.*",
-      "sensitive_fields": true
-    }
-  ]
-}
-```
-
-`mcp_rules` entries apply deanonymization to the **request** and anonymization to the **response** — the opposite of `request_rules` / `response_rules`.
-
-jq path syntax: `.key`, `.key[]` (array expand), `.key[].subkey`
-
-### SYSTEM_PROMPT.md
-Written in plain text/Markdown. Re-read from disk on every request — edit without restarting the proxy. Injected into the `system` field of `/v1/messages` requests only. Deduplication prevents double-injection on Claude Desktop's history resend.
-
----
-
-## Runtime State & Console
-
-```python
-state = {
-    "anon_enabled":           True,   # master anonymization switch (also gates MCP rules)
-    "deanon_enabled":         False,  # response deanonymization (off by default)
-    "anxious_enabled":        True,   # 403 on unredacted sensitive data
-    "save_images":            True,   # save redacted PNGs to data/redacted_images/
-    "system_prompt_enabled":  True,   # inject SYSTEM_PROMPT.md
-    "log_requests":           False,  # log raw pre-anon requests to data/requests-sample.jsonl
-}
-```
-
-Console commands (run `python console.py`):
-
-| Command | Effect |
-|---|---|
-| `anon on/off` | Toggle request anonymization (also disables MCP rules) |
-| `deanon on/off` | Toggle response deanonymization |
-| `anxious on/off` | Toggle the anxious filter |
-| `save images on/off` | Save redacted images to disk |
-| `system prompt on/off` | Toggle system prompt injection |
-| `log requests on/off` | Log raw requests (pre-anonymization) to `data/requests-sample.jsonl` |
-| `status` | Show all flags |
-| `dump` | Print all PII → token mappings |
-| `clear` | Wipe mapping table |
-
----
-
-## Request Logging & Benchmarking
-
-When `log_requests` is enabled, every incoming request is appended to `data/requests-sample.jsonl` **before** anonymization (full headers + body).
-
-To benchmark the anonymization pipeline against saved requests (no network, no real API calls):
 ```bash
-python scripts/push_saved_request.py              # all entries
-python scripts/push_saved_request.py --limit 5    # first 5
-python scripts/push_saved_request.py --index 2    # single entry
-python scripts/push_saved_request.py --dry-run    # list without processing
+docker compose up
 ```
 
-The script imports `rule_applier` directly from `src/`, constructs fake mitmproxy flow objects, and reports per-request timing + a summary. First run is slow (model lazy-loads); subsequent runs benefit from the entity cache.
+The proxy listens on:
+- `:8080` — forward proxy (configure as HTTP/HTTPS proxy in Claude Desktop)
+- `:8000` — reverse proxy to `google-workspace-mcp:8000` (MCP tool calls)
+- `127.0.0.1:9999` — control socket
 
----
+### First run
 
-## Mappings
+On first start, mitmproxy generates a CA certificate at `data/mitmproxy/mitmproxy-ca-cert.pem`. Install it as a trusted CA on every machine routing traffic through the proxy.
 
-`Mappings` stores a bidirectional PII ↔ placeholder map:
-- **Key for lookup**: `sensitive_value.upper()` — case-insensitive dedup (`Alice` and `ALICE` → same token)
-- **Stored value**: original casing preserved for deanonymization
-- **Token format**: `[TYPE_GLOBALID]` e.g. `[PERSON_0]`, `[EMAIL_3]`
+### Environment variables (`.env`)
 
----
-
-## Exempt Markers
-
-Wrap any text in `{{...}}` to prevent anonymization:
-- `{{maxime}}` → passes through as `{{maxime}}` (not anonymized, markers preserved)
-- Entities that overlap (even partially) with an exempt span are dropped entirely
-- The anxious filter also ignores content inside `{{...}}` — it won't 403 on exempt values
-
----
-
-## Docker Setup
-
-```
-docker compose up --build
-```
-
-| Service | Port | Purpose |
-|---|---|---|
-| `mitm-proxy` | 8080 | Forward proxy (Claude API traffic) |
-| `mitm-proxy` | 8001 | Reverse proxy (MCP server traffic) |
-| `mitm-proxy` | 9999 | Control socket (console.py) |
-| `google-workspace-mcp` | 8000 | Google Workspace MCP server (OAuth callback) |
-
-**Required env vars** (`.env` file in project root):
 ```
 GOOGLE_OAUTH_CLIENT_ID=...
 GOOGLE_OAUTH_CLIENT_SECRET=...
 ```
 
-**First-time OAuth login**: visit `http://localhost:8000` in your browser to trigger the Google OAuth flow. Tokens are persisted in `data/google-workspace-mcp/`.
+## Development
 
-**MCP client config** (Claude Desktop / Claude Code): point the MCP server URL at `http://YOUR_HOST:8001`.
+### Modifying rules
 
----
+Edit `assets/rules.jsonc` — it uses `//` line comments and `/* */` block comments (JSONC). Changes are picked up immediately via the Docker volume mount (no rebuild needed).
 
-## Code Style Constraints
+Rule structure:
+```jsonc
+{
+  "anxious_filter_domains": [".*"],   // URL patterns to run the anxious filter on
+  "blocked_urls": [ { "url_pattern": "..." } ],
+  "anonymise": {
+    "requests":  [ { "url_pattern": "...", "sensitive_fields": [".path.to.field"] } ],
+    "responses": [ { "url_pattern": "...", "sensitive_fields": true } ]   // MCP
+  },
+  "deanonymise": {
+    "responses": [ { "url_pattern": "...", "sensitive_fields": [...], "sse_fields": [...] } ]
+  }
+}
+```
 
-- `proxy.py` stays thin — only mitmproxy hooks, no business logic
-- Anonymizer only touches string-type fields — no structural changes to request bodies
-- No over-engineering: helpers only when used in multiple places
-- Any error in request processing must result in 502 — never forward a partially-processed or unredacted request
-- `torch.set_num_threads` called once at module level in `image_anonymizer.py` (PyTorch restriction)
+`sensitive_fields` is either `true` (all strings in the body) or a list of jq path expressions. Paths are expanded recursively to string leaves (`path(expr | .. | strings)`).
 
----
+### Modifying the system prompt
 
-## Models & Dependencies
+Edit `assets/SYSTEM_PROMPT.md`. Injected live — no rebuild needed.
 
-| Dependency | Purpose | Notes |
-|---|---|---|
-| `mitmproxy` | HTTPS proxy framework | Hooks in proxy.py; dual-mode (forward + reverse) |
-| `presidio-analyzer` | Structured PII detection | EMAIL, PHONE, IBAN, SSN, IP, credit card |
-| `transformers` (`elastic/distilbert-base-uncased-finetuned-conll03-english`) | English NER | Active in `ner_finder.py`; detects PERSON, [LOC_29], LOC |
-| `gliner` (`urchade/gliner_multi-v2.1`) | Multilingual NER | Cached locally; not yet wired in |
-| `easyocr` | OCR for image redaction | Singleton; English only; CPU mode |
-| `pydivert` | WinDivert bindings | Windows + admin only; used by proxifier.py |
-| `Pillow` | Image draw/redaction | |
-| `torch` | Backend for NER + EasyOCR | Threaded: `set_num_threads(cpu_count)` |
+### Rebuilding after code changes
 
----
+Source is mounted as a volume, so Python changes take effect on next request. Dependency changes require a rebuild:
 
-## Windows-Specific Notes
+```bash
+docker compose build mitm-proxy validator
+docker compose up
+```
 
-- `proxifier.py` requires **Administrator** — WinDivert needs kernel access
-- `start.bat` starts everything in order: mitmproxy (port 8080) → wait 18s → proxifier → Claude Desktop
-- Proxifier excludes its own PID and mitmproxy's PID to prevent intercept loops
-- mitmproxy CA cert must be installed in Windows trust store for HTTPS interception
+## Validator (Fine-tuning Pipeline)
+
+The validator runs in a separate container, processing saved requests to collect disagreements, fine-tune the NER model, and automatically select the best version.
+
+### Running the validator
+
+**One-time: collect disagreements from the past N requests**
+```bash
+docker compose run validator poetry run python validator/main.py --collect --limit 100
+```
+
+**Fine-tune the model on collected data**
+```bash
+docker compose run validator poetry run python validator/main.py --finetune
+```
+
+**Evaluate both models and keep the better one**
+```bash
+docker compose run validator poetry run python validator/main.py --test
+```
+
+**Full pipeline (collect → finetune → test → select best)**
+```bash
+docker compose run validator poetry run python validator/main.py --all --limit 100
+```
+
+### Weekly automation
+
+To run the validator weekly, set up a cron job on your host:
+```cron
+# Every Sunday at 2am, collect disagreements and fine-tune
+0 2 * * 0 cd /path/to/project && docker compose run -d validator poetry run python validator/main.py --all --limit 200
+```
+
+Or use a scheduler inside the Docker container (e.g., APScheduler).
+
+### Testing the validator
+
+Run unit tests for dataset quality and evaluator logic:
+```bash
+poetry run pytest tests/validator/ -v
+
+# Test specific component
+poetry run pytest tests/validator/test_dataset_builder.py -v
+poetry run pytest tests/validator/test_evaluator.py -v
+```
+
+What the validator checks:
+- ✅ **No empty texts** in training data
+- ✅ **No duplicate entities** in final dataset
+- ✅ **Valid entity types** (PERSON, ORG, LOC, EMAIL, etc.)
+- ✅ **Proper 80/20 train/test split**
+- ✅ **Gemma-validated ground truth** (removes false positives, adds missed entities)
+- ✅ **Model improvement** (keeps new model only if F1 score improves)
+
+### How it works
+
+**Entity Caching (Performance Optimization)**
+
+The proxy logs extracted entities to `data/requests-entities.jsonl` as it anonymizes requests. The validator reuses these cached entities instead of re-running expensive NER extraction.
+
+1. **Proxy** (during normal operation):
+   - In `proxy/engine.py:_apply_paths`, after extracting entities, calls `entity_cache_log.log_extracted_entities()`
+   - Saves: `request_url`, `field_path`, `text`, `entities`
+   - This happens in real-time with minimal overhead
+
+2. **Evaluator** (during validation):
+   - Reads `data/requests-sample.jsonl` (pre-anonymization request log)
+   - For each text field, checks `data/requests-entities.jsonl` for cached entities
+   - If found: uses cached entities (fast path, avoids NER re-run)
+   - If not found: runs WikiNEural NER (fallback for old requests)
+   - Sends to Gemma 4 5B for validation: "Are these entities correct? What did we miss?"
+   - Computes disagreement score (false positives cost 0.3, missed entities cost 0.7)
+
+2. **Dataset Builder** (`validator/dataset_builder.py`):
+   - Consolidates samples with disagreement > 0
+   - Removes false positives flagged by Gemma
+   - Adds missed entities Gemma discovered
+   - Creates 80/20 train/test split in CoNLL format
+
+3. **Trainer** (`validator/trainer.py`):
+   - Fine-tunes `Babelscape/wikineural-multilingual-ner` on collected dataset
+   - Uses HuggingFace Transformers trainer
+   - Saves checkpoint to `models/wikineural_finetuned_YYYYMMDD_HHMMSS/`
+
+4. **Tester** (`validator/tester.py`):
+   - Evaluates baseline (original WikiNEural) on held-out test set
+   - Evaluates fine-tuned model on same test set
+   - If fine-tuned F1 > baseline F1: promote fine-tuned to production, archive baseline
+   - If fine-tuned F1 ≤ baseline F1: delete fine-tuned, keep baseline
+
+## Testing / benchmarking
+
+Replay saved requests through the pipeline without a running proxy or network:
+
+```bash
+# Process up to 10 saved requests
+poetry run python scripts/push_saved_request.py --limit 10
+
+# Process a single request by index
+poetry run python scripts/push_saved_request.py --index 0
+
+# Save the anonymized output
+poetry run python scripts/push_saved_request.py --index 0 --output /tmp/out.json
+
+# List available requests without processing
+poetry run python scripts/push_saved_request.py --dry-run
+```
+
+Requests are logged (before anonymization) to `data/requests-sample.jsonl` when `save_requests=True` in `ProxyOptions`.
+
+## Runtime control
+
+```bash
+# Dump current token ↔ value mappings
+echo "dump" | nc 127.0.0.1 9999
+
+# Clear all mappings (next request starts fresh)
+echo "clear" | nc 127.0.0.1 9999
+```
+
+## Data directories
+
+| Path | Contents |
+|------|---------|
+| `data/mitmproxy/` | mitmproxy CA cert and state |
+| `data/requests-sample.jsonl` | Raw request log (pre-anonymization) |
+| `data/requests-entities.jsonl` | **NEW** Extracted entities per request (proxy → validator) |
+| `data/cache/images/` | Image OCR result cache (SHA-256 keyed JSON) |
+| `data/ignore/` | Debug dumps (last 4xx/5xx body, anxious filter trigger) |
+| `data/hf_cache/` | HuggingFace model weights (NER, Gemma 4, EasyOCR) |
+| `data/validator/` | Validator output: disagreements, training data, test data |
+| `data/validator/disagreements.jsonl` | Raw Gemma-evaluated samples (FP/FN info) |
+| `data/validator/training_data.jsonl` | Gemma-corrected training set (80% of samples) |
+| `data/validator/test_data.jsonl` | Held-out test set (20% of samples) |
+| `models/` | NER model checkpoints |
+| `models/baseline/` | Current production WikiNEural model (updated after successful fine-tune) |
+| `models/baseline_archive/` | Previous baseline (kept for rollback if needed) |
+| `models/wikineural_finetuned_YYYYMMDD_HHMMSS/` | Fine-tuned model checkpoint (deleted if not better) |

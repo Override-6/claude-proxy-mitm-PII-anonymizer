@@ -1,4 +1,4 @@
-from src.mappings import Mappings
+from mappings import Mappings
 
 
 def test_anonimizer() -> None:

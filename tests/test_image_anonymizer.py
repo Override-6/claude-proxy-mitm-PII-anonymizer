@@ -21,8 +21,8 @@ import numpy as np
 import easyocr
 from PIL import Image, ImageDraw, ImageFont
 
-from src.mappings import Mappings
-import src.image_anonymizer as image_anonymizer
+from mappings import Mappings
+import image_anonymizer as image_anonymizer
 
 # Shared reader for verification OCR (avoid reloading the model)
 _reader = easyocr.Reader(["en", "fr"], gpu=False, verbose=False)

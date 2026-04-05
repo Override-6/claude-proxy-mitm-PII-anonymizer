@@ -10,7 +10,7 @@ services:
     #            reverse proxy on 8001 (MCP server traffic, deanon/anon)
     command: >
       poetry run mitmdump
-      -s src/proxy.py
+      -s proxy/main.py
       --mode regular@0.0.0.0:8080
       --mode reverse:http://google-workspace-mcp:8000@0.0.0.0:8000
       --set console_eventlog_verbosity=info
@@ -24,17 +24,26 @@ services:
       # Persists mitmproxy CA cert across restarts.
       # The cert at ./data/mitmproxy-ca-cert.pem must be installed on every
       # client machine that routes traffic through this proxy.
+      # === CRITICAL: Mount host caches to avoid re-downloading dependencies ===
+      # pip cache (wheels, build artifacts) — shared between host and container
+      - ~/.cache/pip:/root/.cache/pip:delegated
+      # poetry cache — shared between host and container
+      - ~/.cache/pypoetry:/root/.cache/pypoetry:delegated
+      # HuggingFace models — shared between host and container
+      - ~/.cache/huggingface:/root/.cache/huggingface:delegated
+      # EasyOCR models — shared between host and container
+      - ~/.EasyOCR:/root/.EasyOCR:delegated
+
+      # === Application data ===
+      # Persists mitmproxy CA cert across restarts.
       - ./data/mitmproxy:/root/.mitmproxy
       # Runtime config — edit without rebuilding
-      - ./rules.json:/app/rules.json:ro
-      - ./SYSTEM_PROMPT.md:/app/SYSTEM_PROMPT.md:ro
+      - ./assets:/app/assets:ro
       # Persistent cache and audit log
       - ./data/cache:/app/cache
       - ./data/ignore:/app/ignore
-      # HuggingFace model cache — persists GLiNER/EasyOCR weights across image rebuilds
-      - ./data/hf_cache:/root/.cache/huggingface
       # Mount source code so code changes take effect without rebuilding the image
-      - ./src:/app/src
+      - ./proxy:/app/proxy
       # All /app/data output (redacted images, request log, …)
       - ./data:/app/data
       # Fine-tuned NER models
@@ -43,6 +52,43 @@ services:
       - PYTHONUNBUFFERED=1
     depends_on:
       - google-workspace-mcp
+
+  validator:
+    build:
+      context: .
+      dockerfile: docker/validator.dockerfile
+    container_name: claude-validator
+    restart: unless-stopped
+    # Validator runs as a scheduled service inside the container
+    # No host cron — everything is containerized
+    command: poetry run python validator/main.py --daemon
+    volumes:
+      # === CRITICAL: Mount host caches to avoid re-downloading dependencies ===
+      # pip cache (wheels, build artifacts) — shared between host and container
+      - ~/.cache/pip:/root/.cache/pip:delegated
+      # poetry cache — shared between host and container
+      - ~/.cache/pypoetry:/root/.cache/pypoetry:delegated
+      # HuggingFace models — shared between host and container
+      - ~/.cache/huggingface:/root/.cache/huggingface:delegated
+
+      # === Application data ===
+      # Shared request log (read-only)
+      - ./data/requests-sample.jsonl:/app/data/requests-sample.jsonl:ro
+      # Output: collected disagreements
+      - ./data/validator:/app/data/validator
+      # Fine-tuned models
+      - ./models:/app/models
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Schedule: run every Sunday at 2am (configurable)
+      - VALIDATOR_SCHEDULE_ENABLED=true
+      - VALIDATOR_SCHEDULE_DAY=sun
+      - VALIDATOR_SCHEDULE_HOUR=2
+      - VALIDATOR_SCHEDULE_MINUTE=0
+      # Process up to 200 requests per run
+      - VALIDATOR_REQUEST_LIMIT=200
+    depends_on:
+      - mitm-proxy
 
   google-workspace-mcp:
     build:

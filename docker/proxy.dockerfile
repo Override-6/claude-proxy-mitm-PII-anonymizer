@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -13,18 +14,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# PHASE 1: Install dependencies (only when pyproject.toml/poetry.lock changes)
+# This layer is independent of source code, so it's cached even if code changes
 COPY pyproject.toml poetry.lock ./
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install poetry
 
-RUN --mount=type=cache,target=/root/.cache/poetry \
-    poetry install
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    --mount=type=cache,target=/root/.cache/pypoetry,sharing=locked \
+    pip install --no-cache-dir poetry && \
+    poetry config virtualenvs.in-project true && \
+    poetry install --no-root --no-cache
 
-# Pre-download EasyOCR English + French models — EasyOCR uses ~/.EasyOCR by default
-RUN --mount=type=cache,target=/root/.EasyOCR \
-    poetry run python -c "import easyocr; easyocr.Reader(['en', 'fr'], gpu=False)"
-
+# PHASE 2: Copy source code (doesn't invalidate dependency cache thanks to .dockerignore)
 COPY . .
+
+# Install the project itself
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    --mount=type=cache,target=/root/.cache/pypoetry,sharing=locked \
+    poetry install --no-cache
+
+# Pre-download models (cached on host via docker-compose volume mounts)
+RUN --mount=type=cache,target=/root/.cache/huggingface,sharing=locked \
+    poetry run python -m spacy download en_core_web_lg || true
+
+RUN --mount=type=cache,target=/root/.EasyOCR,sharing=locked \
+    poetry run python -c "import easyocr; easyocr.Reader(['en', 'fr'], gpu=False)" || true
 
 EXPOSE 8080
 
@@ -32,7 +45,7 @@ EXPOSE 8080
 VOLUME ["/root/.mitmproxy", "/app/cache", "/app/ignore"]
 
 CMD ["poetry", "run", "mitmdump", \
-     "-s", "src/proxy.py", \
+     "-s", "proxy/main.py", \
      "--listen-port", "8080", \
      "--listen-host", "0.0.0.0", \
      "--set", "console_eventlog_verbosity=info", \

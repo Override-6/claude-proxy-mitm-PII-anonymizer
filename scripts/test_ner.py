@@ -15,7 +15,7 @@ _SRC = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
 from src.entity_finder.ner_finder import NEREntityFinder  # noqa: E402
-from src.mappings import Mappings  # noqa: E402
+from mappings import Mappings  # noqa: E402
 
 
 def main():
@@ -34,7 +34,7 @@ def main():
     for text in texts:
         print(f"\nInput : {text}")
         t0 = time.time()
-        entities = finder.find_entities(text, mappings)
+        entities = next(finder.find_entities_batch([text], mappings))
         t1 = time.time()
         print(f"Completed in {t1 - t0} seconds")
         if not entities:
