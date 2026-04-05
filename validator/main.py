@@ -80,6 +80,20 @@ def finetune_model():
         log.error("Run with --collect first to generate training data")
         return False
 
+    # Check if dataset is empty
+    sample_count = 0
+    try:
+        with open(dataset_file, "r") as f:
+            sample_count = sum(1 for _ in f)
+    except Exception as e:
+        log.error(f"Could not read dataset: {e}")
+        return False
+
+    if sample_count == 0:
+        log.error("Training dataset is empty. No disagreements were collected.")
+        log.error("Run with --collect first to generate training data with disagreements")
+        return False
+
     trainer = Trainer(dataset_file=dataset_file, output_dir=MODELS_DIR)
     model_path = trainer.train()
 
