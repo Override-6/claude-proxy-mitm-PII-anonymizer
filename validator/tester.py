@@ -74,6 +74,9 @@ class Tester:
             text = sample["text"]
             entities = sample.get("entities", [])
 
+            if not text or not entities:  # Skip empty samples
+                continue
+
             # Get model predictions
             preds = ner_pipe(text)
 
@@ -81,12 +84,18 @@ class Tester:
             pred_labels = self._convert_to_bio(text, preds)
             true_labels = self._convert_to_bio(text, entities)
 
-            all_preds.append(pred_labels)
-            all_true.append(true_labels)
+            # Ensure equal length for seqeval
+            min_len = min(len(pred_labels), len(true_labels))
+            all_preds.append(pred_labels[:min_len])
+            all_true.append(true_labels[:min_len])
 
-        # Calculate F1
-        f1 = f1_score(all_true, all_preds)
-        report = classification_report(all_true, all_preds)
+        # Calculate F1 (seqeval expects list of lists)
+        if all_preds and all_true:
+            f1 = f1_score(all_true, all_preds)
+            report = classification_report(all_true, all_preds)
+        else:
+            f1 = 0.0
+            report = "No test data"
 
         return f1, report
 

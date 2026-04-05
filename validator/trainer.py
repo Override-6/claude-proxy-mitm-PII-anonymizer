@@ -12,7 +12,7 @@ from pathlib import Path
 from transformers import (
     AutoTokenizer,
     AutoModelForTokenClassification,
-    Trainer,
+    Trainer as HFTrainer,
     TrainingArguments,
     DataCollatorForTokenClassification,
 )
@@ -127,19 +127,17 @@ class Trainer:
             save_strategy="epoch",
             save_total_limit=1,
             dataloader_num_workers=0,  # CPU only
-            no_cuda=True,
         )
 
         # Data collator
         data_collator = DataCollatorForTokenClassification(self.tokenizer)
 
         # Trainer
-        trainer = Trainer(
+        trainer = HFTrainer(
             model=self.model,
             args=training_args,
             train_dataset=tokenized,
             data_collator=data_collator,
-            tokenizer=self.tokenizer,
         )
 
         log.info("Starting fine-tuning...")
