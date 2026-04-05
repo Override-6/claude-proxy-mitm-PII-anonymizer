@@ -7,16 +7,9 @@ MITM Proxy for intercepting Claude Desktop traffic.
 import asyncio
 import json
 import os
-import sys
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-
-# Add the repo root to sys.path so mitmproxy can find the proxy package
-# Works in both Docker (/app) and local development (repo root)
-repo_root = Path(__file__).parent.parent
-if str(repo_root) not in sys.path:
-    sys.path.insert(0, str(repo_root))
 
 from mitmproxy import http
 

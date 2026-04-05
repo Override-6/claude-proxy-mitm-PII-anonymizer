@@ -12,8 +12,8 @@ from typing import List, Generator
 
 from presidio_analyzer import AnalyzerEngine, BatchAnalyzerEngine, RecognizerResult
 
-from ..mappings import Mappings
-from . import AbstractEntityFinder, Entity
+from proxy.mappings import Mappings
+from proxy.entity_finder import AbstractEntityFinder, Entity
 
 # Entity types to detect.  Presidio supports dozens — we pick the ones relevant
 # to a privacy-focused proxy intercepting LLM traffic.

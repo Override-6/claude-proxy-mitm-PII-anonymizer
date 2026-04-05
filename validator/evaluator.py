@@ -7,18 +7,11 @@ Uses pre-extracted entities from data/requests-entities.jsonl when available.
 
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import Generator
 
 from transformers import pipeline
 
-# Ensure repo root is in path (for both Docker /app and local dev)
-repo_root = Path(__file__).parent.parent
-if str(repo_root) not in sys.path:
-    sys.path.insert(0, str(repo_root))
-
-from proxy.entity_finder.ner_finder import NEREntityFinder
 from proxy.entity_cache_log import get_cached_entities
 
 log = logging.getLogger(__name__)
@@ -27,18 +20,19 @@ log = logging.getLogger(__name__)
 class Evaluator:
     """Use Gemma 4 to validate WikiNEural entity extraction."""
 
-    def __init__(self, requests_file: Path):
-        self.requests_file = requests_file
+    def __init__(self, entities_file: Path):
+        self.entities_file = entities_file
 
-        log.info("Loading WikiNEural NER model...")
-        self.ner = NEREntityFinder()
+        if not self.entities_file.exists():
+            raise FileNotFoundError(f"Entity cache not found: {self.entities_file}")
 
-        log.info("Loading TinyLlama-1.1B for evaluation...")
+        log.info("Loading TinyLlama-1.1B for evaluation (GPU)...")
+        import torch
         self.gemma = pipeline(
             "text-generation",
             model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-            device_map="cpu",
-            torch_dtype="float32",
+            device_map="auto",
+            dtype=torch.float16,  # Mixed precision for GPU
             max_new_tokens=300,
         )
 
@@ -87,6 +81,81 @@ class Evaluator:
                 return {"correct": False, "missed": []}
 
         return {"correct": False, "missed": []}
+
+    def _evaluate_entities(self, text: str, entities) -> dict:
+        """
+        Evaluate entities already extracted by proxy using Gemma.
+        """
+        # Build Gemma evaluation prompt with chain-of-thought
+        extracted_list = [f'"{e.text}" as {e.type}' for e in entities]
+        extracted_str = ", ".join(extracted_list) if extracted_list else "no entities"
+
+        # Chain-of-thought prompt: ask model to reason FIRST, then output JSON
+        prompt = f"""You are a PII validation expert for API requests and code contexts.
+Your task is to evaluate whether an NER model correctly identified personal/sensitive information.
+
+TEXT TO ANALYZE:
+"{text}"
+
+ENTITIES FOUND BY WikiNEural NER:
+{extracted_str}
+
+IMPORTANT CONTEXT:
+- This text is from an API request or code context, not a document
+- Generic terms like "User", "Admin", "Developer", "The Engineer" are NOT personal data
+- Role descriptions like "role: 'Admin'" should not be flagged as PII
+- Only flag ACTUAL names of specific people, organizations, or locations / addresses
+- Text can be either French or English, or a mix of both
+
+THINK STEP BY STEP:
+1. For each detected entity, is it ACTUALLY PII in this context?
+   - If it's a generic placeholder or role label, it's a false positive
+   - If it's someone's real name or organization name, it's correct
+2. Did the model miss any real PII?
+   - Look for names of people, company names, locations, addresses
+   - Ignore generic terms and placeholders, pronouns etc
+3. Provide your confidence (high/medium/low) for your assessment
+
+After thinking through the analysis, provide ONLY a JSON response (nothing else after the JSON):
+{{
+  "correct": true/false,
+  "false_positives": ["entity1", "entity2"],
+  "missed_entities": [{{"text": "...", "type": "PERSON/ORG/LOC/EMAIL/PHONE"}}],
+  "confidence": "high/medium/low"
+}}"""
+
+        try:
+            response = self.gemma(
+                prompt,
+                return_full_text=False,
+                max_new_tokens=300,
+                do_sample=True,
+                temperature=0.7,
+            )
+            response_text = response[0]["generated_text"] if response else ""
+            gemma_eval = self._parse_gemma_response(response_text)
+        except Exception as e:
+            log.warning(f"Gemma evaluation failed: {e}")
+            gemma_eval = {
+                "correct": True,
+                "false_positives": [],
+                "missed_entities": [],
+                "confidence": "low"
+            }
+
+        # Compute disagreement score
+        disagreement = 0
+        if gemma_eval.get("false_positives"):
+            disagreement += len(gemma_eval["false_positives"]) * 0.3
+        if gemma_eval.get("missed_entities"):
+            disagreement += len(gemma_eval["missed_entities"]) * 0.7
+
+        return {
+            "text": text,
+            "wikineural": [(e.text, e.type) for e in entities],
+            "gemma_eval": gemma_eval,
+            "disagreement_score": disagreement,
+        }
 
     def _evaluate_text(self, text: str, request_url: str = None, field_path: str = None) -> dict:
         """
@@ -203,36 +272,74 @@ After thinking through the analysis, provide ONLY a JSON response (nothing else 
 
     def evaluate_batch(self, limit: int = None) -> Generator[dict, None, None]:
         """
-        Process requests from JSONL file, evaluate text fields.
-        Uses cached entities when available.
+        Process entities directly from requests-entities.jsonl.
+        Evaluates already-extracted entities via Gemma.
         Yields disagreement samples for training dataset.
         """
-        log.info(f"Processing requests from {self.requests_file}")
+        log.info(f"Processing entities from {self.entities_file}")
 
         count = 0
-        with open(self.requests_file, "r") as f:
+        processed = 0
+        skipped = 0
+        disagreements = 0
+
+        with open(self.entities_file, "r") as f:
             for line in f:
-                if limit and count >= limit:
+                if limit and disagreements >= limit:
                     break
 
                 try:
-                    request = json.loads(line)
-                    body = request.get("request", {}).get("body", {})
-                    request_url = request.get("request", {}).get("pretty_url", "unknown")
+                    entry = json.loads(line)
+                    text = entry.get("text", "")
+                    processed += 1
 
-                    if not isinstance(body, dict):
+                    if not text or len(text) < 10:
+                        skipped += 1
+                        if processed % 50 == 0:
+                            log.info(f"[Progress] Processed: {processed}, Skipped: {skipped}, Disagreements: {disagreements}")
                         continue
 
-                    texts = self._extract_text_fields(body)
+                    # Get entities already extracted by proxy
+                    entities_list = entry.get("entities", [])
+                    if not entities_list:
+                        skipped += 1
+                        if processed % 50 == 0:
+                            log.info(f"[Progress] Processed: {processed}, Skipped: {skipped}, Disagreements: {disagreements}")
+                        continue
 
-                    for text, field_path in texts:
-                        result = self._evaluate_text(text, request_url=request_url, field_path=field_path)
-                        result["field_path"] = field_path
-                        result["request_id"] = request_url
+                    # Convert to Entity-like objects
+                    entities = [
+                        type('Entity', (), {
+                            'text': e['text'],
+                            'type': e['type'],
+                            'start': e.get('start', 0),
+                            'end': e.get('end', 0)
+                        })()
+                        for e in entities_list
+                    ]
 
+                    # Filter out pronouns/articles
+                    pronouns = {"i", "you", "he", "she", "it", "we", "they", "the", "a", "an"}
+                    entities = [e for e in entities if e.text.lower() not in pronouns and len(e.text) > 2]
+
+                    if not entities:
+                        skipped += 1
+                        if processed % 50 == 0:
+                            log.info(f"[Progress] Processed: {processed}, Skipped: {skipped}, Disagreements: {disagreements}")
+                        continue
+
+                    # Evaluate with Gemma
+                    result = self._evaluate_entities(text, entities)
+                    if result.get("disagreement_score", 0) > 0:
                         yield result
-                        count += 1
+                        disagreements += 1
+                        log.debug(f"[Disagreement {disagreements}] Score: {result['disagreement_score']:.2f}, Text: {text[:60]}...")
+
+                    if processed % 50 == 0:
+                        log.info(f"[Progress] Processed: {processed}, Skipped: {skipped}, Disagreements: {disagreements}")
 
                 except Exception as e:
-                    log.warning(f"Error processing request: {e}")
+                    log.warning(f"Error processing entity: {e}")
                     continue
+
+        log.info(f"[Complete] Total processed: {processed}, Skipped: {skipped}, Disagreements found: {disagreements}")

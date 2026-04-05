@@ -8,12 +8,12 @@ from dataclasses import dataclass
 import jq
 from mitmproxy.http import Headers
 
-from . import claude_system_prompt
-from . import cache
-from .entity_finder.mappings_finder import MappingsEntityFinder
-from .mappings import Mappings
-from .entity_finder import AbstractEntityFinder, Entity
-from .rules import ProxyRules, AnonymiseRule, DeanonymiseRule
+from proxy import claude_system_prompt
+from proxy import cache
+from proxy.entity_finder.mappings_finder import MappingsEntityFinder
+from proxy.mappings import Mappings
+from proxy.entity_finder import AbstractEntityFinder, Entity
+from proxy.rules import ProxyRules, AnonymiseRule, DeanonymiseRule
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class ProxyOptions:
     anxious_filter: bool = True
     save_redacted_images: bool = True
     inject_system_prompt: bool = True
-    save_requests: bool = True
+    save_requests: bool = False
 
 
 @dataclass

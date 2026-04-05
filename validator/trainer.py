@@ -113,20 +113,22 @@ class Trainer:
             remove_columns=dataset.column_names,
         )
 
-        # Training arguments (CPU-friendly)
+        # Training arguments (GPU-optimized)
+        import torch
         training_args = TrainingArguments(
             output_dir=str(self.model_output_dir),
             num_train_epochs=3,
-            per_device_train_batch_size=8,
-            per_device_eval_batch_size=8,
+            per_device_train_batch_size=16 if torch.cuda.is_available() else 8,  # Larger batch on GPU
+            per_device_eval_batch_size=16 if torch.cuda.is_available() else 8,
             warmup_steps=100,
             weight_decay=0.01,
-            logging_dir=str(self.model_output_dir / "logs"),
             logging_steps=10,
             learning_rate=2e-5,
             save_strategy="epoch",
             save_total_limit=1,
-            dataloader_num_workers=0,  # CPU only
+            dataloader_num_workers=4 if torch.cuda.is_available() else 0,
+            fp16=torch.cuda.is_available(),  # Mixed precision on GPU
+            optim="adamw_8bit" if torch.cuda.is_available() else "adamw_torch",  # 8bit optimizer on GPU
         )
 
         # Data collator

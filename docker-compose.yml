@@ -50,6 +50,7 @@ services:
       - ./models:/app/models
     environment:
       - PYTHONUNBUFFERED=1
+      - PYTHONPATH=.
     depends_on:
       - google-workspace-mcp
 
@@ -78,8 +79,12 @@ services:
       - ./data/validator:/app/data/validator
       # Fine-tuned models
       - ./models:/app/models
+      # source code
+      - ./validator:/app/validator:ro
+      - ./proxy:/app/proxy:ro
     environment:
       - PYTHONUNBUFFERED=1
+      - PYTHONPATH=.
       # Schedule: run every Sunday at 2am (configurable)
       - VALIDATOR_SCHEDULE_ENABLED=true
       - VALIDATOR_SCHEDULE_DAY=sun

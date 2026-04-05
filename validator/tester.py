@@ -57,11 +57,12 @@ class Tester:
             (f1_score, detailed_report)
         """
         log.info(f"Loading model: {model_name_or_path}")
+        import torch
         ner_pipe = pipeline(
             "ner",
             model=model_name_or_path,
             aggregation_strategy="simple",
-            device=-1,  # CPU
+            device=0 if torch.cuda.is_available() else -1,  # GPU if available, else CPU
         )
 
         test_data = self._load_test_data()

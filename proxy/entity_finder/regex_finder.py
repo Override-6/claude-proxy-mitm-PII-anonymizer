@@ -1,8 +1,8 @@
 from re import Pattern
 from typing import List, Tuple
 
-from ..mappings import Mappings
-from . import AbstractEntityFinder, Entity
+from proxy.mappings import Mappings
+from proxy.entity_finder import AbstractEntityFinder, Entity
 
 
 class RegexEntityFinder(AbstractEntityFinder):

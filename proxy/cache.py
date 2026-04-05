@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from .entity_finder import Entity
+from proxy.entity_finder import Entity
 
 _entity_cache: dict[str, list[Entity]] = {}
 _entity_cache_hits: dict[str, int] = {}

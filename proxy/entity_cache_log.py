@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import List
 
-from .entity_finder import Entity
+from proxy.entity_finder import Entity
 
 log = logging.getLogger(__name__)
 

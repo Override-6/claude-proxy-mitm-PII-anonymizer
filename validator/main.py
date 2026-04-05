@@ -23,14 +23,11 @@ import sys
 import time
 from pathlib import Path
 
-# Add validator directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
-
-from dataset_builder import DatasetBuilder
-from evaluator import Evaluator
-from trainer import Trainer
-from tester import Tester
-from scheduler import ValidatorScheduler
+from validator.dataset_builder import DatasetBuilder
+from validator.evaluator import Evaluator
+from validator.trainer import Trainer
+from validator.tester import Tester
+from validator.scheduler import ValidatorScheduler
 
 log = logging.getLogger(__name__)
 logging.basicConfig(
@@ -44,7 +41,7 @@ DATA_DIR = repo_root / "data"
 MODELS_DIR = repo_root / "models"
 
 VALIDATOR_DIR = DATA_DIR / "validator"
-REQUESTS_FILE = DATA_DIR / "requests-sample.jsonl"
+ENTITIES_FILE = DATA_DIR / "requests-entities.jsonl"
 
 # Ensure directories exist
 VALIDATOR_DIR.mkdir(parents=True, exist_ok=True)
@@ -55,19 +52,17 @@ def collect_disagreements(limit: int = None):
     """Collect disagreements between WikiNEural and Gemma 4."""
     log.info("Starting disagreement collection...")
 
-    evaluator = Evaluator(requests_file=REQUESTS_FILE)
+    evaluator = Evaluator(entities_file=ENTITIES_FILE)
     dataset_builder = DatasetBuilder(output_dir=VALIDATOR_DIR)
 
     count = 0
     for sample in evaluator.evaluate_batch(limit=limit):
-        if sample.get("disagreement_score", 0) > 0:
-            dataset_builder.add_sample(sample)
-            count += 1
-            if count % 10 == 0:
-                log.info(f"Collected {count} disagreements...")
+        # evaluate_batch already filters disagreements > 0
+        dataset_builder.add_sample(sample)
+        count += 1
 
     dataset_builder.finalize()
-    log.info(f"Collected {count} total disagreements. Dataset saved to {VALIDATOR_DIR}")
+    log.info(f"✓ Collected {count} total disagreements. Dataset saved to {VALIDATOR_DIR}")
 
 
 def finetune_model():

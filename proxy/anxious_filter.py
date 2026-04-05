@@ -5,9 +5,9 @@ from typing import Tuple
 
 from mitmproxy import http
 
-from .entity_finder import Entity
-from .entity_finder.mappings_finder import MappingsEntityFinder
-from .mappings import Mappings, REDACTED_REGEX
+from proxy.entity_finder import Entity
+from proxy.entity_finder.mappings_finder import MappingsEntityFinder
+from proxy.mappings import Mappings, REDACTED_REGEX
 
 # Relative paths from repo root
 repo_root = Path(__file__).parent.parent

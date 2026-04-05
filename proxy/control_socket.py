@@ -7,7 +7,7 @@ Each connection sends one command and receives one JSON response, then closes.
 import asyncio
 import json
 
-from .engine import DLPProxy
+from proxy.engine import DLPProxy
 
 CONTROL_HOST = "0.0.0.0"
 CONTROL_PORT = 9999
