@@ -9,19 +9,20 @@ import json
 import os
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from mitmproxy import http
 
-import engine
-from anxious_filter import anxious_filter, trigger_anxious_filter
-from proxy.cache import start_cache_prune_task
-from control_socket import init_control_socket
-from engine import DLPProxy, ProxyOptions, make_deanon_chunk
-from entity_cache_log import init_entities_log
-from entity_finder.ner_finder import NEREntityFinder
-from entity_finder.presidio_finder import PresidioEntityFinder
-from mappings import Mappings
-from rules import load_rules
+from . import engine
+from .anxious_filter import anxious_filter, trigger_anxious_filter
+from .cache import start_cache_prune_task
+from .control_socket import init_control_socket
+from .engine import DLPProxy, ProxyOptions, make_deanon_chunk
+from .entity_cache_log import init_entities_log
+from .entity_finder.ner_finder import NEREntityFinder
+from .entity_finder.presidio_finder import PresidioEntityFinder
+from .mappings import Mappings
+from .rules import load_rules
 
 proxy = DLPProxy(
     mappings=Mappings(),
@@ -56,7 +57,10 @@ async def running():
 # Request logging
 # ---------------------------------------------------------------------------
 
-_REQUESTS_LOG = "/app/data/requests-sample.jsonl"
+# Use relative paths from repo root
+repo_root = Path(__file__).parent.parent
+_REQUESTS_LOG = repo_root / "data" / "requests-sample.jsonl"
+_IGNORE_DIR = repo_root / "data" / "ignore"
 
 
 def _log_request(flow: http.HTTPFlow) -> None:
@@ -198,8 +202,8 @@ async def response(flow: http.HTTPFlow):
             print(f"[proxy] {flow.response.status_code} from {flow.request.pretty_url}")
             print(f"[proxy] Response: {body}")
             try:
-                dump_path = f"/app/ignore/last_{flow.response.status_code}_body.json"
-                os.makedirs("/app/ignore", exist_ok=True)
+                _IGNORE_DIR.mkdir(parents=True, exist_ok=True)
+                dump_path = _IGNORE_DIR / f"last_{flow.response.status_code}_body.json"
                 with open(dump_path, "w") as f:
                     f.write(req_body)
                 print(f"[proxy] Full request body saved to {dump_path}")

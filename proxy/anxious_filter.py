@@ -1,12 +1,17 @@
 import os
 import re
+from pathlib import Path
 from typing import Tuple
 
 from mitmproxy import http
 
-from entity_finder import Entity
-from entity_finder.mappings_finder import MappingsEntityFinder
-from mappings import Mappings, REDACTED_REGEX
+from .entity_finder import Entity
+from .entity_finder.mappings_finder import MappingsEntityFinder
+from .mappings import Mappings, REDACTED_REGEX
+
+# Relative paths from repo root
+repo_root = Path(__file__).parent.parent
+_IGNORE_DIR = repo_root / "data" / "ignore"
 
 # Strip {{...}} spans that are intentionally left unredacted
 _EXEMPT_RE = re.compile(r'\{\{.*?\}\}', re.DOTALL)
@@ -31,8 +36,8 @@ def trigger_anxious_filter(url: str, flow: http.HTTPFlow, entities: list[Entity]
     print(f"[proxy] Request {url} contained {len(entities)} unmasked sensitive entities.")
     print(f"[proxy] Entities: {set(e.text for e in entities)}")
     try:
-        dump_path = "/app/ignore/last_anxious_filter.json"
-        os.makedirs("/app/ignore", exist_ok=True)
+        _IGNORE_DIR.mkdir(parents=True, exist_ok=True)
+        dump_path = _IGNORE_DIR / "last_anxious_filter.json"
         with open(dump_path, "w") as f:
             f.write(flow.request.get_content().decode("utf-8", errors="replace"))
         print(f"[proxy] Full request body saved to {dump_path}")

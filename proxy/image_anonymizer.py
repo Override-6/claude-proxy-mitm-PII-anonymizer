@@ -34,10 +34,10 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-from mappings import Mappings
-from engine import DLPProxy, overlaps  # DLPProxy imported for type reference in anonymize_image
-from entity_finder import Entity
-from entity_finder.regex_finder import RegexEntityFinder
+from .mappings import Mappings
+from .engine import DLPProxy, overlaps  # DLPProxy imported for type reference in anonymize_image
+from .entity_finder import Entity
+from .entity_finder.regex_finder import RegexEntityFinder
 
 log = logging.getLogger(__name__)
 

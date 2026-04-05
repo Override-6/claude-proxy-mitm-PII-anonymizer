@@ -8,12 +8,12 @@ from dataclasses import dataclass
 import jq
 from mitmproxy.http import Headers
 
-import claude_system_prompt
-import cache
-from entity_finder.mappings_finder import MappingsEntityFinder
-from mappings import Mappings
-from entity_finder import AbstractEntityFinder, Entity
-from rules import ProxyRules, AnonymiseRule, DeanonymiseRule
+from . import claude_system_prompt
+from . import cache
+from .entity_finder.mappings_finder import MappingsEntityFinder
+from .mappings import Mappings
+from .entity_finder import AbstractEntityFinder, Entity
+from .rules import ProxyRules, AnonymiseRule, DeanonymiseRule
 
 log = logging.getLogger(__name__)
 
