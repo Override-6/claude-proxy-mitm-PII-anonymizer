@@ -108,6 +108,8 @@ class Tester:
         # Map each token to entity type (simplified)
         for entity in entities:
             ent_text = entity.get("text") if isinstance(entity, dict) else entity
+            if not ent_text:  # Skip if text is None or empty
+                continue
             for i, token in enumerate(tokens):
                 if ent_text.lower() in token.lower():
                     ent_type = entity.get("type", "PER") if isinstance(entity, dict) else "PER"

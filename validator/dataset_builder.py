@@ -94,17 +94,25 @@ class DatasetBuilder:
             for ent in sample.get("wikineural", [])
         ]
 
-        # Remove false positives
-        fp_texts = set(gemma_eval.get("false_positives", []))
+        # Remove false positives (can be list of strings or list of dicts)
+        fp_list = gemma_eval.get("false_positives", [])
+        fp_texts = set()
+        for fp in fp_list:
+            if isinstance(fp, dict):
+                fp_texts.add(fp.get("text", ""))
+            else:
+                fp_texts.add(str(fp))
         entities = [e for e in entities if e["text"] not in fp_texts]
 
-        # Add missed entities
+        # Add missed entities (normalize to dict format)
         for missed in gemma_eval.get("missed_entities", []):
+            missed_text = missed.get("text") if isinstance(missed, dict) else missed
+            missed_type = missed.get("type", "PER") if isinstance(missed, dict) else "PER"
             # Avoid duplicates
-            if not any(e["text"] == missed["text"] for e in entities):
+            if not any(e["text"] == missed_text for e in entities):
                 entities.append({
-                    "text": missed["text"],
-                    "type": missed["type"]
+                    "text": missed_text,
+                    "type": missed_type
                 })
 
         return {

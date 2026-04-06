@@ -118,17 +118,17 @@ class Trainer:
         training_args = TrainingArguments(
             output_dir=str(self.model_output_dir),
             num_train_epochs=3,
-            per_device_train_batch_size=16 if torch.cuda.is_available() else 8,  # Larger batch on GPU
-            per_device_eval_batch_size=16 if torch.cuda.is_available() else 8,
+            per_device_train_batch_size=4 if torch.cuda.is_available() else 2,  # Smaller batch to fit 6GB GPU
+            per_device_eval_batch_size=4 if torch.cuda.is_available() else 2,
             warmup_steps=100,
             weight_decay=0.01,
             logging_steps=10,
             learning_rate=2e-5,
             save_strategy="epoch",
             save_total_limit=1,
-            dataloader_num_workers=4 if torch.cuda.is_available() else 0,
-            fp16=torch.cuda.is_available(),  # Mixed precision on GPU
-            optim="adamw_8bit" if torch.cuda.is_available() else "adamw_torch",  # 8bit optimizer on GPU
+            dataloader_num_workers=0,  # Disable to reduce memory
+            fp16=False,  # Disable mixed precision to fit 6GB GPU
+            optim="adamw_torch",  # Standard optimizer
         )
 
         # Data collator

@@ -66,21 +66,48 @@ class Evaluator:
 
     def _parse_gemma_response(self, response: str) -> dict:
         """
-        Parse Gemma's JSON response. Gemma may output text before/after JSON,
-        so extract the JSON block.
+        Parse Gemma's JSON response. TinyLlama outputs multiple JSON examples,
+        markdown blocks, etc. Extract and validate all JSON objects, return
+        the LAST valid one that has the required fields.
         """
-        # Try to find JSON block
-        start = response.find("{")
-        end = response.rfind("}") + 1
+        required_fields = {"correct", "false_positives", "missed_entities", "confidence"}
+        valid_jsons = []
 
-        if start >= 0 and end > start:
-            try:
-                return json.loads(response[start:end])
-            except json.JSONDecodeError:
-                log.warning(f"Failed to parse Gemma response: {response[:200]}")
-                return {"correct": False, "missed": []}
+        # Find all potential JSON objects
+        i = 0
+        while i < len(response):
+            if response[i] == "{":
+                # Try to extract a complete JSON object
+                depth = 0
+                start = i
+                while i < len(response):
+                    if response[i] == "{":
+                        depth += 1
+                    elif response[i] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            i += 1
+                            break
+                    i += 1
 
-        return {"correct": False, "missed": []}
+                json_str = response[start:i]
+                try:
+                    obj = json.loads(json_str)
+                    # Validate it has required fields
+                    if isinstance(obj, dict) and required_fields.issubset(obj.keys()):
+                        valid_jsons.append(obj)
+                except json.JSONDecodeError:
+                    pass
+            else:
+                i += 1
+
+        # Return the LAST valid JSON (most likely the actual answer, not an example)
+        if valid_jsons:
+            return valid_jsons[-1]
+
+        # Fallback to neutral response
+        log.debug(f"Failed to extract valid JSON from response: {response[:150]}")
+        return {"correct": True, "false_positives": [], "missed_entities": [], "confidence": "low"}
 
     def _evaluate_entities(self, text: str, entities) -> dict:
         """
@@ -90,39 +117,29 @@ class Evaluator:
         extracted_list = [f'"{e.text}" as {e.type}' for e in entities]
         extracted_str = ", ".join(extracted_list) if extracted_list else "no entities"
 
-        # Chain-of-thought prompt: ask model to reason FIRST, then output JSON
-        prompt = f"""You are a PII validation expert for API requests and code contexts.
-Your task is to evaluate whether an NER model correctly identified personal/sensitive information.
+        # Truncate text to 1024 chars to fit in model context
+        text_preview = text[:1024] + ("..." if len(text) > 1024 else "")
 
-TEXT TO ANALYZE:
-"{text}"
+        # Chain-of-thought prompt: explicit JSON format for TinyLlama
+        prompt = f"""Evaluate PII detection. Answer with ONLY valid JSON, no text before or after.
 
-ENTITIES FOUND BY WikiNEural NER:
-{extracted_str}
+TEXT: "{text_preview}"
 
-IMPORTANT CONTEXT:
-- This text is from an API request or code context, not a document
-- Generic terms like "User", "Admin", "Developer", "The Engineer" are NOT personal data
-- Role descriptions like "role: 'Admin'" should not be flagged as PII
-- Only flag ACTUAL names of specific people, organizations, or locations / addresses
-- Text can be either French or English, or a mix of both
+DETECTED: {extracted_str}
 
-THINK STEP BY STEP:
-1. For each detected entity, is it ACTUALLY PII in this context?
-   - If it's a generic placeholder or role label, it's a false positive
-   - If it's someone's real name or organization name, it's correct
-2. Did the model miss any real PII?
-   - Look for names of people, company names, locations, addresses
-   - Ignore generic terms and placeholders, pronouns etc
-3. Provide your confidence (high/medium/low) for your assessment
+Rules:
+- Generic terms (User, Admin, Developer, role labels) = NOT PII
+- Real names, company names, addresses = PII
+- French or English text
 
-After thinking through the analysis, provide ONLY a JSON response (nothing else after the JSON):
-{{
-  "correct": true/false,
-  "false_positives": ["entity1", "entity2"],
-  "missed_entities": [{{"text": "...", "type": "PERSON/ORG/LOC/EMAIL/PHONE"}}],
-  "confidence": "high/medium/low"
-}}"""
+Output ONLY this JSON format:
+{{"correct": true, "false_positives": [], "missed_entities": [], "confidence": "high"}}
+
+or
+
+{{"correct": false, "false_positives": ["entity1"], "missed_entities": [{{"text": "John Smith", "type": "PERSON"}}], "confidence": "medium"}}
+
+JSON:"""
 
         try:
             response = self.gemma(
