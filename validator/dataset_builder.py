@@ -6,6 +6,7 @@ Converts disagreement samples into CoNLL-2003 BIO format for fine-tuning.
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import List, Dict, Tuple
 
@@ -79,22 +80,48 @@ class DatasetBuilder:
 
         return tokens, labels
 
+    _VALID_ENTITY_TYPES = {"PERSON", "ORG", "LOC"}
+    _NON_NAME_PATTERNS = re.compile(
+        r"@|https?://|www\.|^\d{1,3}(\.\d{1,3}){3}|^\d+$|^\[|\.\.\."
+    )
+    _TYPE_ALIASES = {
+        "PER": "PERSON",
+        "ORGANIZATION": "ORG",
+        "COMPANY": "ORG",
+        "LOCATION": "LOC",
+        "GPE": "LOC",
+        "PLACE": "LOC",
+    }
+
+    def _normalize_type(self, entity_type: str) -> str | None:
+        """Return canonical type (PERSON/ORG/LOC) or None if unsupported."""
+        t = entity_type.upper()
+        t = self._TYPE_ALIASES.get(t, t)
+        return t if t in self._VALID_ENTITY_TYPES else None
+
+
     def _build_ground_truth(self, sample: dict) -> dict:
         """
         Build ground truth labels from Gemma evaluation.
 
         Merges WikiNEural predictions with Gemma corrections.
+        Only keeps PERSON, ORG, LOC entities that appear in the text.
         """
         text = sample["text"]
         gemma_eval = sample.get("gemma_eval", {})
 
-        # Start with WikiNEural entities
-        entities = [
-            {"text": ent[0], "type": ent[1]}
-            for ent in sample.get("wikineural", [])
-        ]
+        # Start with WikiNEural entities — filter to valid types and verify in text, deduplicate
+        seen = set()
+        entities = []
+        for ent_text, ent_type in sample.get("wikineural", []):
+            normalized = self._normalize_type(ent_type)
+            if normalized and ent_text in text and not self._NON_NAME_PATTERNS.search(ent_text):
+                key = (ent_text, normalized)
+                if key not in seen:
+                    seen.add(key)
+                    entities.append({"text": ent_text, "type": normalized})
 
-        # Remove false positives (can be list of strings or list of dicts)
+        # Remove false positives
         fp_list = gemma_eval.get("false_positives", [])
         fp_texts = set()
         for fp in fp_list:
@@ -104,16 +131,22 @@ class DatasetBuilder:
                 fp_texts.add(str(fp))
         entities = [e for e in entities if e["text"] not in fp_texts]
 
-        # Add missed entities (normalize to dict format)
+        # Add missed entities — validate text presence and type
         for missed in gemma_eval.get("missed_entities", []):
-            missed_text = missed.get("text") if isinstance(missed, dict) else missed
-            missed_type = missed.get("type", "PER") if isinstance(missed, dict) else "PER"
-            # Avoid duplicates
+            missed_text = missed.get("text") if isinstance(missed, dict) else str(missed)
+            raw_type = missed.get("type", "") if isinstance(missed, dict) else ""
+            missed_type = self._normalize_type(raw_type)
+            if not missed_type:
+                log.debug(f"Skipping missed entity with invalid type {raw_type!r}: {missed_text!r}")
+                continue
+            if self._NON_NAME_PATTERNS.search(missed_text):
+                log.debug(f"Skipping non-name missed entity: {missed_text!r}")
+                continue
+            if missed_text not in text:
+                log.debug(f"Skipping missed entity not in text: {missed_text!r}")
+                continue
             if not any(e["text"] == missed_text for e in entities):
-                entities.append({
-                    "text": missed_text,
-                    "type": missed_type
-                })
+                entities.append({"text": missed_text, "type": missed_type})
 
         return {
             "text": text,

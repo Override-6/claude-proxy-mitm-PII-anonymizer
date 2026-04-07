@@ -57,12 +57,11 @@ def collect_disagreements(limit: int = None):
 
     count = 0
     for sample in evaluator.evaluate_batch(limit=limit):
-        # evaluate_batch already filters disagreements > 0
         dataset_builder.add_sample(sample)
         count += 1
 
     dataset_builder.finalize()
-    log.info(f"✓ Collected {count} total disagreements. Dataset saved to {VALIDATOR_DIR}")
+    log.info(f"✓ Collected {count} samples (Gemma-validated). Dataset saved to {VALIDATOR_DIR}")
 
 
 def finetune_model():
@@ -159,7 +158,7 @@ Examples:
         "--limit",
         type=int,
         default=None,
-        help="Limit number of requests to process (for testing)"
+        help="Max number of samples to collect (unique texts evaluated by Gemma)"
     )
     parser.add_argument(
         "--daemon",

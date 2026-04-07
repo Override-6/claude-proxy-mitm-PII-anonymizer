@@ -1,8 +1,8 @@
 from re import Pattern
-from typing import List, Tuple
+from typing import List, Tuple, Generator
 
-from proxy.mappings import Mappings
 from proxy.entity_finder import AbstractEntityFinder, Entity
+from proxy.mappings import Mappings
 
 
 class RegexEntityFinder(AbstractEntityFinder):
@@ -11,9 +11,10 @@ class RegexEntityFinder(AbstractEntityFinder):
     def __init__(self, patterns: List[Tuple[Pattern, str]]):
         self.patterns = patterns
 
-    def find_entities(self, text: str, mappings: Mappings) -> List[Entity]:
-        return [
-            Entity(match.group(0), label, match.start(), match.end())
-            for pattern, label in self.patterns
-            for match in pattern.finditer(text)
-        ]
+    def find_entities_batch(self, texts: List[str], mappings: Mappings) -> Generator[List[Entity], None, None]:
+        for text in texts:
+            yield [
+                Entity(match.group(0), label, match.start(), match.end())
+                for pattern, label in self.patterns
+                for match in pattern.finditer(text)
+            ]

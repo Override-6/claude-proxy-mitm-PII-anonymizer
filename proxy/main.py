@@ -66,20 +66,21 @@ _IGNORE_DIR = repo_root / "data" / "ignore"
 def _log_request(flow: http.HTTPFlow) -> None:
     try:
         content = flow.request.get_content()
-        body_str = content.decode("utf-8", errors="replace") if content else ""
-        try:
-            body = json.loads(body_str)
-        except (json.JSONDecodeError, ValueError):
-            body = body_str
-        entry = {
+        if not content:
+            return
+        # Splice the raw body bytes directly into the JSONL record without
+        # parsing them into Python objects.  Parsing a 500 MB JSON body creates
+        # a 2-4 GB Python dict — the single largest allocation before NER runs.
+        meta = json.dumps({
             "url": flow.request.pretty_url,
             "method": flow.request.method,
             "headers": dict(flow.request.headers),
-            "body": body,
-        }
+        }, ensure_ascii=False)
+        body_str = content.decode("utf-8", errors="replace")
         os.makedirs(os.path.dirname(_REQUESTS_LOG), exist_ok=True)
         with open(_REQUESTS_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            # meta ends with "}" — insert "body" before the closing brace.
+            f.write(meta[:-1] + ', "body": ' + body_str + '}\n')
     except Exception as e:
         print(f"[proxy] Could not log request: {e}")
 
@@ -228,15 +229,19 @@ async def response(flow: http.HTTPFlow):
                 # Still send response but log error
             return
 
-        # Deanonymize non-streaming responses before they reach the client
-        try:
-            new_content = await engine.deanonymize_message(proxy, content)
-            if new_content is not None:
-                flow.response.set_content(new_content)
-        except Exception as e:
-            print(f"[proxy] Error deanonymizing response: {e}")
-            traceback.print_exc()
-            # Still send response but log error
+        # Deanonymize non-streaming text/JSON responses before they reach the client
+        # Skip binary content types — decoding them as UTF-8 corrupts the data
+        response_ct = flow.response.headers.get("content-type", "")
+        is_text = any(t in response_ct for t in ("application/json", "text/"))
+        if is_text:
+            try:
+                new_content = await engine.deanonymize_message(proxy, content)
+                if new_content is not None:
+                    flow.response.set_content(new_content)
+            except Exception as e:
+                print(f"[proxy] Error deanonymizing response: {e}")
+                traceback.print_exc()
+                # Still send response but log error
     except Exception as e:
         print(f"[proxy] Unexpected error in response processing: {e}")
         traceback.print_exc()

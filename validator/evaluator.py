@@ -7,6 +7,7 @@ Uses pre-extracted entities from data/requests-entities.jsonl when available.
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Generator
 
@@ -26,14 +27,20 @@ class Evaluator:
         if not self.entities_file.exists():
             raise FileNotFoundError(f"Entity cache not found: {self.entities_file}")
 
-        log.info("Loading TinyLlama-1.1B for evaluation (GPU)...")
+        import os
         import torch
+        has_cuda = torch.cuda.is_available()
+        device = "auto" if has_cuda else "cpu"
+        dtype = torch.bfloat16 if has_cuda else torch.float32
+        log.info(f"Loading google/gemma-3-1b-it for evaluation ({'GPU' if has_cuda else 'CPU'})...")
+        # HF_TOKEN only needed on first download (host). In container the model
+        # is baked into the image at HF_HOME=/app/hf_cache — no token required.
         self.gemma = pipeline(
             "text-generation",
-            model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-            device_map="auto",
-            dtype=torch.float16,  # Mixed precision for GPU
-            max_new_tokens=300,
+            model="google/gemma-3-1b-it",
+            device_map=device,
+            dtype=dtype,
+            token=os.environ.get("HF_TOKEN"),
         )
 
     def _extract_text_fields(self, obj: dict, path_prefix: str = "") -> list[tuple[str, str]]:
@@ -109,6 +116,71 @@ class Evaluator:
         log.debug(f"Failed to extract valid JSON from response: {response[:150]}")
         return {"correct": True, "false_positives": [], "missed_entities": [], "confidence": "low"}
 
+    _VALID_ENTITY_TYPES = {"PERSON", "ORG", "LOC"}
+    # Patterns that are clearly not PERSON/ORG/LOC names
+    _NON_NAME_PATTERNS = re.compile(
+        r"@|https?://|www\.|^\d{1,3}(\.\d{1,3}){3}|^\d+$|^\[|\.\.\."
+    )
+
+    def _is_likely_name(self, text: str) -> bool:
+        """Return False for obvious non-names (emails, IPs, URLs, placeholders)."""
+        return not self._NON_NAME_PATTERNS.search(text)
+
+    def _validate_gemma_eval(self, gemma_eval: dict, text: str) -> dict:
+        """
+        Post-process Gemma output to remove hallucinations and invalid types.
+
+        Rules:
+        - missed_entities must actually appear as a substring in text
+        - only PERSON, ORG, LOC types are allowed
+        - entities that look like emails/IPs/URLs are rejected
+        - false_positives must appear as substrings in text
+        """
+        valid_missed = []
+        for ent in gemma_eval.get("missed_entities", []):
+            if not isinstance(ent, dict):
+                continue
+            ent_text = ent.get("text", "")
+            ent_type = ent.get("type", "").upper()
+            # Normalize common aliases
+            if ent_type in ("PER", "PERSON"):
+                ent_type = "PERSON"
+            elif ent_type in ("ORGANIZATION", "COMPANY"):
+                ent_type = "ORG"
+            elif ent_type in ("LOCATION", "GPE", "PLACE"):
+                ent_type = "LOC"
+            if ent_type not in self._VALID_ENTITY_TYPES:
+                log.debug(f"Dropping missed entity with invalid type {ent_type!r}: {ent_text!r}")
+                continue
+            if not self._is_likely_name(ent_text):
+                log.debug(f"Dropping non-name missed entity: {ent_text!r}")
+                continue
+            if ent_text not in text:
+                log.debug(f"Dropping hallucinated missed entity (not in text): {ent_text!r}")
+                continue
+            valid_missed.append({"text": ent_text, "type": ent_type})
+
+        # Only trust false positives when Gemma is confident.
+        # Low/medium confidence FP claims are too unreliable on a small CPU model.
+        confidence = gemma_eval.get("confidence", "low")
+        valid_fp = []
+        if confidence == "high":
+            for fp in gemma_eval.get("false_positives", []):
+                fp_text = fp.get("text", "") if isinstance(fp, dict) else str(fp)
+                if fp_text in text:
+                    valid_fp.append(fp_text)
+                else:
+                    log.debug(f"Dropping hallucinated false positive (not in text): {fp_text!r}")
+        else:
+            log.debug(f"Skipping FP claims (confidence={confidence!r})")
+
+        return {
+            "correct": gemma_eval.get("correct", True),
+            "false_positives": valid_fp,
+            "missed_entities": valid_missed,
+            "confidence": gemma_eval.get("confidence", "low"),
+        }
+
     def _evaluate_entities(self, text: str, entities) -> dict:
         """
         Evaluate entities already extracted by proxy using Gemma.
@@ -120,24 +192,24 @@ class Evaluator:
         # Truncate text to 1024 chars to fit in model context
         text_preview = text[:1024] + ("..." if len(text) > 1024 else "")
 
-        # Chain-of-thought prompt: explicit JSON format for TinyLlama
-        prompt = f"""Evaluate PII detection. Answer with ONLY valid JSON, no text before or after.
+        # Gemma is only used to VALIDATE (detect false positives).
+        # It does NOT suggest missed entities — that direction causes hallucination
+        # and the fine-tuning itself will fix WikiNEural's missed detections over time.
+        prompt = f"""You are a named entity recognition validator.
 
-TEXT: "{text_preview}"
+TEXT: {text_preview}
 
-DETECTED: {extracted_str}
+DETECTED ENTITIES: {extracted_str}
 
-Rules:
-- Generic terms (User, Admin, Developer, role labels) = NOT PII
-- Real names, company names, addresses = PII
-- French or English text
+For each detected entity, decide: is it a false positive?
+A false positive is anything that is NOT a specific real-world named entity:
+- NOT a false positive: real person names, real organization names, real place names
+- FALSE POSITIVE: common words, verbs, articles, technical terms, file paths, generic nouns
 
-Output ONLY this JSON format:
-{{"correct": true, "false_positives": [], "missed_entities": [], "confidence": "high"}}
+List only the false positives (entities that should NOT have been detected).
 
-or
-
-{{"correct": false, "false_positives": ["entity1"], "missed_entities": [{{"text": "John Smith", "type": "PERSON"}}], "confidence": "medium"}}
+Respond with ONLY JSON:
+{{"correct": true_or_false, "false_positives": ["entity1", "entity2"], "missed_entities": [], "confidence": "high|medium|low"}}
 
 JSON:"""
 
@@ -145,12 +217,12 @@ JSON:"""
             response = self.gemma(
                 prompt,
                 return_full_text=False,
-                max_new_tokens=300,
-                do_sample=True,
-                temperature=0.7,
+                max_new_tokens=200,
+                do_sample=False,  # Greedy decoding to minimize hallucination
             )
             response_text = response[0]["generated_text"] if response else ""
             gemma_eval = self._parse_gemma_response(response_text)
+            gemma_eval = self._validate_gemma_eval(gemma_eval, text)
         except Exception as e:
             log.warning(f"Gemma evaluation failed: {e}")
             gemma_eval = {
@@ -160,12 +232,9 @@ JSON:"""
                 "confidence": "low"
             }
 
-        # Compute disagreement score
-        disagreement = 0
-        if gemma_eval.get("false_positives"):
-            disagreement += len(gemma_eval["false_positives"]) * 0.3
-        if gemma_eval.get("missed_entities"):
-            disagreement += len(gemma_eval["missed_entities"]) * 0.7
+        # Disagreement = WikiNEural tagged something Gemma says is wrong.
+        # Missed entities are intentionally ignored — Gemma hallucinates there.
+        disagreement = len(gemma_eval.get("false_positives", []))
 
         return {
             "text": text,
@@ -255,6 +324,7 @@ After thinking through the analysis, provide ONLY a JSON response (nothing else 
                 response_text = response_text[json_start:]
 
             gemma_eval = self._parse_gemma_response(response_text)
+            gemma_eval = self._validate_gemma_eval(gemma_eval, text)
         except Exception as e:
             log.warning(f"Gemma evaluation failed: {e}")
             gemma_eval = {
@@ -295,10 +365,10 @@ After thinking through the analysis, provide ONLY a JSON response (nothing else 
         """
         log.info(f"Processing entities from {self.entities_file}")
 
-        count = 0
         processed = 0
         skipped = 0
         disagreements = 0
+        seen_texts: set[str] = set()
 
         with open(self.entities_file, "r") as f:
             for line in f:
@@ -315,6 +385,11 @@ After thinking through the analysis, provide ONLY a JSON response (nothing else 
                         if processed % 50 == 0:
                             log.info(f"[Progress] Processed: {processed}, Skipped: {skipped}, Disagreements: {disagreements}")
                         continue
+
+                    if text in seen_texts:
+                        skipped += 1
+                        continue
+                    seen_texts.add(text)
 
                     # Get entities already extracted by proxy
                     entities_list = entry.get("entities", [])
@@ -345,7 +420,8 @@ After thinking through the analysis, provide ONLY a JSON response (nothing else 
                             log.info(f"[Progress] Processed: {processed}, Skipped: {skipped}, Disagreements: {disagreements}")
                         continue
 
-                    # Evaluate with Gemma
+                    # Only yield disagreements — these are the high-signal samples where
+                    # WikiNEural was wrong. Correct samples don't improve fine-tuning.
                     result = self._evaluate_entities(text, entities)
                     if result.get("disagreement_score", 0) > 0:
                         yield result

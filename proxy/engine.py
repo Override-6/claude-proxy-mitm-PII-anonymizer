@@ -1,4 +1,5 @@
 import base64
+import gc
 import json
 import logging
 import re
@@ -13,13 +14,15 @@ from proxy import cache
 from proxy.entity_finder.mappings_finder import MappingsEntityFinder
 from proxy.mappings import Mappings
 from proxy.entity_finder import AbstractEntityFinder, Entity
-from proxy.rules import ProxyRules, AnonymiseRule, DeanonymiseRule
+from proxy.rules import ProxyRules, AnonymiseRule
 
 log = logging.getLogger(__name__)
 
 REDACTED_REGEX = re.compile(r'\[([A-Z_]+)_[0-9]+]')
 
 _mappings_finder = MappingsEntityFinder()
+# Compiled jq programs keyed by frozenset of expressions — reused across requests.
+_compiled_expand: dict[tuple, object] = {}
 
 
 @dataclass
@@ -39,41 +42,99 @@ class DLPProxy:
 
 
 def expand_paths(obj: dict, expressions: list[str]) -> list[list[str | int]]:
-    combined = "[" + ", ".join(f"path({e} | .. | strings)" for e in expressions) + "]"
+    """Find all paths to string leaves matching any of the given jq expressions.
+
+    All expressions are merged into a single jq call so the full document is
+    serialised through jq's C heap only ONCE per request (previously once per
+    expression). The compiled jq program is cached for the lifetime of the
+    process so compilation cost is paid only once per unique rule set.
+    """
+    key = tuple(expressions)
+    if key not in _compiled_expand:
+        if len(expressions) == 1 and expressions[0] == ".":
+            prog_src = "[path(.. | strings)] | unique"
+        else:
+            # Combine all expressions into one generator inside path() so jq
+            # traverses the document once.
+            combined = ", ".join(f"({e} | .. | strings)" for e in expressions)
+            prog_src = f"[path({combined})] | unique"
+        _compiled_expand[key] = jq.compile(prog_src)
+
     try:
-        return jq.compile(combined).input(obj).first()
+        result = _compiled_expand[key].input(obj).first()
+        return result if result else []
     except (ValueError, StopIteration):
         return []
 
 
 def get_values(obj: dict, paths: list[list]) -> list[str]:
-    try:
-        return jq.compile('[.[] | . as $p | $obj | getpath($p)]', args={'obj': obj}).input(paths).first()
-    except (ValueError, StopIteration):
-        return []
+    """Extract values at the given paths using pure-Python traversal.
+
+    The previous jq-based implementation serialised the entire JSON body through
+    jq's C heap on every call.  Pure Python eliminates that allocation entirely.
+    """
+    result = []
+    for path in paths:
+        try:
+            val = obj
+            for key in path:
+                val = val[key]
+            result.append(val if isinstance(val, str) else "")
+        except (KeyError, IndexError, TypeError):
+            result.append("")
+    return result
 
 
 def set_values(obj: dict, values: list[tuple[list, str]]) -> dict:
     for path, value in values:
+        if not path:
+            continue
         try:
-            obj = jq.compile('setpath($p; $v)', args={'p': path, 'v': value}).input(obj).first()
-        except (ValueError, StopIteration):
+            target = obj
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+        except (KeyError, IndexError, TypeError):
             pass
     return obj
 
 
-def overlaps(entity: Entity, accepted: list[Entity]) -> bool:
-    """Return True if *entity* overlaps any already-accepted entity."""
-    return any(entity.start < a.end and entity.end > a.start for a in accepted)
+def _add_non_overlapping(target: list[Entity], candidates: list[Entity]) -> None:
+    """Extend target with candidates that don't overlap any entity already in target.
+
+    The naive pattern — checking each candidate against every accepted entity —
+    is O(M*K) where M = len(candidates) and K = len(target).  For large texts
+    (MappingsEntityFinder runs on ALL values every request) this becomes the
+    dominant cost.
+
+    This implementation sorts the combined set by start position and keeps the
+    first entity when spans overlap, giving O((M+K) log(M+K)) total.
+    """
+    if not candidates:
+        return
+    if not target:
+        target.extend(sorted(candidates, key=lambda e: e.start))
+        return
+
+    combined = sorted(target + candidates, key=lambda e: e.start)
+    target.clear()
+    for entity in combined:
+        if not target or entity.start >= target[-1].end:
+            target.append(entity)
 
 
 def redact_entities(text: str, entities: list[Entity], mappings: Mappings) -> str:
-    chars = list(text)
-    for entity in sorted(entities, key=lambda ent: ent.start, reverse=True):
+    if not entities:
+        return text
+    parts = []
+    prev = 0
+    for entity in sorted(entities, key=lambda ent: ent.start):
         s, e = entity.start, entity.end
-        replacement = mappings.get_or_set_redacted_text(text[s:e], entity.type)
-        chars[s:e] = list(replacement)
-    return ''.join(chars)
+        parts.append(text[prev:s])
+        parts.append(mappings.get_or_set_redacted_text(text[s:e], entity.type))
+        prev = e
+    parts.append(text[prev:])
+    return ''.join(parts)
 
 
 async def _apply_paths(proxy: DLPProxy, data: dict, sensitive_fields: list[str] | bool, url: str = None) -> dict:
@@ -95,18 +156,15 @@ async def _apply_paths(proxy: DLPProxy, data: dict, sensitive_fields: list[str] 
 
     non_cached_indices = [i for i, c in enumerate(cached_results) if c is None]
     non_cached_values = [values[i] for i in non_cached_indices]
-
     # Run all finders on non-cached texts
     if non_cached_values:
         for finder in proxy.finders:
             for list_idx, entities in zip(non_cached_indices, finder.find_entities_batch(non_cached_values, proxy.mappings)):
-                entities_list[list_idx].extend(
-                    e for e in entities if not overlaps(e, entities_list[list_idx])
-                )
+                _add_non_overlapping(entities_list[list_idx], entities)
 
     # Run MappingsEntityFinder on all texts to catch re-occurrences of known sensitive values
     for i, entities in enumerate(_mappings_finder.find_entities_batch(values, proxy.mappings)):
-        entities_list[i].extend(e for e in entities if not overlaps(e, entities_list[i]))
+        _add_non_overlapping(entities_list[i], entities)
 
     updates: list[tuple[list, str]] = []
     for path_list, value, entities in zip(paths, values, entities_list):
@@ -166,13 +224,19 @@ async def _anonymize_base64_images(proxy: DLPProxy, data: dict) -> dict:
     return data
 
 
-def _log_anonymization_diff(original: str, new_content: str) -> None:
-    if new_content == original:
-        print(f"[anonymizer] WARNING: body unchanged after anonymization ({len(original)} chars)")
+_REDACTED_RE_BYTES = re.compile(rb'\[[A-Z_]+_\d+\]')
+_REDACTED_RE_STR  = re.compile(r'\[[A-Z_]+_\d+\]')
+
+
+def _log_anonymization_diff(raw: bytes, new_content: str) -> None:
+    # Scan for tokens on the raw bytes directly — avoids keeping a separate
+    # re-serialised 'original' string alongside the parsed body dict.
+    orig_tokens = {m.group(0).decode() for m in _REDACTED_RE_BYTES.finditer(raw)}
+    new_tokens  = set(_REDACTED_RE_STR.findall(new_content))
+    injected    = new_tokens - orig_tokens
+    if len(new_content) == len(raw) and not injected:
+        print(f"[anonymizer] WARNING: body unchanged after anonymization ({len(raw)} bytes)")
         return
-    orig_tokens = set(re.findall(r'\[[A-Z_]+_\d+\]', original))
-    new_tokens = set(re.findall(r'\[[A-Z_]+_\d+\]', new_content))
-    injected = new_tokens - orig_tokens
     if not injected:
         print("[anonymizer] Body changed (system prompt injected, no new tokens)")
         return
@@ -184,19 +248,18 @@ def _log_anonymization_diff(original: str, new_content: str) -> None:
 
 async def _apply_rule_json(proxy: DLPProxy, raw: bytes, sensitive_fields: list[str] | bool, url: str) -> bytes:
     body = json.loads(raw)
-    original = json.dumps(body, ensure_ascii=False)
+    # Do NOT keep a json.dumps(body) 'original' here — for large conversations
+    # that extra string is 1× body size in memory alongside the parsed dict
+    # (3-5×) and the final new_content (1×), pushing peak to 6-7× body size.
 
-    # Anonymize base64 images in content blocks
     body = await _anonymize_base64_images(proxy, body)
-
-    # Anonymize text fields (with URL for entity logging)
     body = await _apply_paths(proxy, body, sensitive_fields, url=url)
 
     if proxy.options.inject_system_prompt:
         body = claude_system_prompt.inject(body, url)
 
     new_content = json.dumps(body, ensure_ascii=False)
-    _log_anonymization_diff(original, new_content)
+    _log_anonymization_diff(raw, new_content)
     return new_content.encode("utf-8", errors="ignore")
 
 
@@ -270,6 +333,7 @@ async def anonymize_message(proxy: DLPProxy, headers: Headers, content: bytes | 
         content = await _apply_rule_json(proxy, content, matched_rule.sensitive_fields, url)
 
     print(f"[anonymizer] Done in {time.time() - t0:.3f}s — {url}")
+
     return content
 
 

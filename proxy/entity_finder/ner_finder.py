@@ -10,6 +10,7 @@ To switch models: update _MODEL_NAME.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import List, Generator
 
@@ -31,9 +32,10 @@ _MIN_ENTITY_CHARS = 4
 _MAX_ENTITY_CHARS = 50
 _MIN_SCORE = 0.80
 
-# ~1000 chars stays well under 512 tokens for most text
-_CHUNK_MAX_CHARS = 1000
-_CHUNK_OVERLAP_CHARS = 100
+# Token-based chunking — guarantees we stay under the model's 512-token limit
+# regardless of script (CJK, base64, minified JSON, ...).
+_CHUNK_MAX_TOKENS = 450
+_CHUNK_OVERLAP_TOKENS = 50
 
 
 class NEREntityFinder(AbstractEntityFinder):
@@ -42,6 +44,7 @@ class NEREntityFinder(AbstractEntityFinder):
         print(f"Loading NER model ({model_name})...")
         tokenizer = AutoTokenizer.from_pretrained(model_name, model_max_length=512, truncation=True)
         model = AutoModelForTokenClassification.from_pretrained(model_name)
+        self._tokenizer = tokenizer
         self._pipe = pipeline(
             "ner",
             model=model,
@@ -49,25 +52,39 @@ class NEREntityFinder(AbstractEntityFinder):
             aggregation_strategy="simple",
             device=0 if torch.cuda.is_available() else -1,
         )
+        self._lock = threading.Lock()
         print(f"NER model loaded! ({model_name})")
 
     def _chunk_text(self, text: str) -> list[tuple[str, int]]:
         """
-        Split text into overlapping chunks of ~_CHUNK_MAX_CHARS characters.
-        Cuts at word boundaries. Returns list of (chunk, offset_in_original).
+        Split text into overlapping chunks bounded by *tokens*, not characters.
+
+        Uses the tokenizer's overflow mechanism so each chunk is guaranteed to
+        fit in the model's 512-token window — independent of script (CJK,
+        base64, minified JSON, long unbroken strings, ...). Returns
+        (chunk_text, char_offset_in_original) pairs.
         """
-        chunks = []
-        start = 0
-        while start < len(text):
-            end = min(start + _CHUNK_MAX_CHARS, len(text))
-            if end < len(text):
-                boundary = text.rfind(" ", start, end)
-                if boundary > start:
-                    end = boundary
-            chunks.append((text[start:end], start))
-            if end >= len(text):
-                break
-            start = end - _CHUNK_OVERLAP_CHARS
+        if not text:
+            return []
+
+        encoding = self._tokenizer(
+            text,
+            return_offsets_mapping=True,
+            return_overflowing_tokens=True,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=_CHUNK_MAX_TOKENS,
+            stride=_CHUNK_OVERLAP_TOKENS,
+        )
+
+        chunks: list[tuple[str, int]] = []
+        for offsets in encoding["offset_mapping"]:
+            real = [(s, e) for s, e in offsets if not (s == 0 and e == 0)]
+            if not real:
+                continue
+            start_char = real[0][0]
+            end_char = real[-1][1]
+            chunks.append((text[start_char:end_char], start_char))
         return chunks
 
     def _to_entities(self, groups: list, text: str, text_offset: int = 0) -> List[Entity]:
@@ -118,21 +135,38 @@ class NEREntityFinder(AbstractEntityFinder):
         char_count = sum([len(text) for text in texts])
         t0 = time.time()
 
-        # chunk_meta[i] is set by _gen() before the pipeline consumes chunk i,
-        # so it is always populated when the pipeline result for chunk i arrives.
-        chunk_meta: list[tuple[str, int]] = []  # (original_idx, chunk_text, offset)
+        # chunk_meta[i] = (text_idx, chunk_text, offset_in_text)
+        chunk_meta: list[tuple[int, str, int]] = []
 
-        def _gen():
-            for text in texts:
-                for chunk_text, offset in self._chunk_text(text):
-                    chunk_meta.append((chunk_text, offset))
-                    yield chunk_text
+        for text_idx, text in enumerate(texts):
+            for chunk_text, offset in self._chunk_text(text):
+                chunk_meta.append((text_idx, chunk_text, offset))
+        # Accumulate entities per text across all their chunks.
+        # seen_spans deduplicates entities from overlapping chunk regions.
+        accumulated: list[list[Entity]] = [[] for _ in texts]
+        seen_spans: list[set[tuple[int, int]]] = [set() for _ in texts]
+
+        if not chunk_meta:
+            return None
 
         try:
-            for chunk_i, groups in enumerate(self._pipe(_gen(), batch_size=32)):
-                chunk_text, offset = chunk_meta[chunk_i]
-                yield self._to_entities(groups, chunk_text, text_offset=offset)
+            def _gen():
+                for _, chunk_text, _ in chunk_meta:
+                    yield chunk_text
+
+            with self._lock:
+                for chunk_i, groups in enumerate(self._pipe(_gen(), batch_size=32)):
+                    text_idx, chunk_text, offset = chunk_meta[chunk_i]
+                    for entity in self._to_entities(groups, chunk_text, text_offset=offset):
+                        key = (entity.start, entity.end)
+                        if key not in seen_spans[text_idx]:
+                            seen_spans[text_idx].add(key)
+                            accumulated[text_idx].append(entity)
         finally:
             t1 = time.time()
+            print(f"[ner] operation took {t1 - t0} seconds for ner over {char_count} chars")
 
-            print(f"[ner] operation took {t1 - t0} seconds for ner over {char_count} chars ({chunk_i + 1} chunk)")
+        for entities in accumulated:
+            yield entities
+
+        return None

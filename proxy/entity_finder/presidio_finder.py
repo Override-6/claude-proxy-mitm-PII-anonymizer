@@ -12,8 +12,8 @@ from typing import List, Generator
 
 from presidio_analyzer import AnalyzerEngine, BatchAnalyzerEngine, RecognizerResult
 
-from proxy.mappings import Mappings
 from proxy.entity_finder import AbstractEntityFinder, Entity
+from proxy.mappings import Mappings
 
 # Entity types to detect.  Presidio supports dozens — we pick the ones relevant
 # to a privacy-focused proxy intercepting LLM traffic.
@@ -93,15 +93,7 @@ class PresidioEntityFinder(AbstractEntityFinder):
             out.append(Entity(span_text, entity_type, r.start, r.end))
         return out
 
-    def find_entities(self, text: str, mappings: Mappings) -> List[Entity]:
-        results = self._analyzer.analyze(
-            text=text,
-            entities=self._entities,
-            language="en",
-        )
-        return self._to_entities(results, text)
-
-    def find_entities_batch(self, texts: List[str], mappings: Mappings) -> List[List[Entity]]:
+    def find_entities_batch(self, texts: List[str], mappings: Mappings) -> Generator[list[Entity], None, None]:
         if not texts:
             return None
         batch_results = self._batch_analyzer.analyze_iterator(

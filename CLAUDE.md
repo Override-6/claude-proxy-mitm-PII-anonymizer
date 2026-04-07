@@ -267,3 +267,5 @@ echo "clear" | nc 127.0.0.1 9999
 | `models/baseline/` | Current production WikiNEural model (updated after successful fine-tune) |
 | `models/baseline_archive/` | Previous baseline (kept for rollback if needed) |
 | `models/wikineural_finetuned_YYYYMMDD_HHMMSS/` | Fine-tuned model checkpoint (deleted if not better) |
+
+Some json files in the data dir are huge, one huge object per line so grepping isnt always the best idea. remember that you have access to `jq` command utility.

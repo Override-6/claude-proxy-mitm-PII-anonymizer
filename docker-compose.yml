@@ -58,6 +58,8 @@ services:
     build:
       context: .
       dockerfile: docker/validator.dockerfile
+      args:
+        HF_TOKEN: ${HF_TOKEN}
     container_name: claude-validator
     restart: unless-stopped
     # Validator runs as a scheduled service inside the container
@@ -65,18 +67,19 @@ services:
     command: poetry run python validator/main.py --daemon
     volumes:
       # === CRITICAL: Mount host caches to avoid re-downloading dependencies ===
-      # pip cache (wheels, build artifacts) — shared between host and container
       - ~/.cache/pip:/root/.cache/pip:delegated
-      # poetry cache — shared between host and container
       - ~/.cache/pypoetry:/root/.cache/pypoetry:delegated
-      # HuggingFace models — shared between host and container
-      - ~/.cache/huggingface:/root/.cache/huggingface:delegated
+      # Note: HuggingFace models are baked into the image at /app/hf_cache —
+      # we do NOT mount ~/.cache/huggingface here to avoid shadowing them.
 
       # === Application data ===
+      # Shared entity cache (proxy writes, validator reads)
+      #- ./data/requests-entities.jsonl:/app/data/requests-entities.jsonl:ro
       # Shared request log (read-only)
-      - ./data/requests-sample.jsonl:/app/data/requests-sample.jsonl:ro
-      # Output: collected disagreements
-      - ./data/validator:/app/data/validator
+      #- ./data/requests-sample.jsonl:/app/data/requests-sample.jsonl:ro
+      # Output: collected disagreements + training data
+      # App data
+      - ./data:/app/data
       # Fine-tuned models
       - ./models:/app/models
       # source code
@@ -85,10 +88,15 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=.
-      # Schedule: run every Sunday at 2am (configurable)
+      # HF_HOME points to the baked-in model cache (set at build time in Dockerfile)
+      - HF_HOME=/app/hf_cache
+      # Prevent any runtime network calls to HuggingFace — model is baked into image
+      - TRANSFORMERS_OFFLINE=1
+      - HF_DATASETS_OFFLINE=1
+      # Schedule: run every Saturday at midnight
       - VALIDATOR_SCHEDULE_ENABLED=true
-      - VALIDATOR_SCHEDULE_DAY=sun
-      - VALIDATOR_SCHEDULE_HOUR=2
+      - VALIDATOR_SCHEDULE_DAY=sat
+      - VALIDATOR_SCHEDULE_HOUR=0
       - VALIDATOR_SCHEDULE_MINUTE=0
       # Process up to 200 requests per run
       - VALIDATOR_REQUEST_LIMIT=200

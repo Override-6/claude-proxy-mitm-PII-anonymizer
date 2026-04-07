@@ -35,7 +35,7 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 
 from proxy.mappings import Mappings
-from proxy.engine import DLPProxy, overlaps  # DLPProxy imported for type reference in anonymize_image
+from proxy.engine import DLPProxy, _add_non_overlapping  # DLPProxy imported for type reference in anonymize_image
 from proxy.entity_finder import Entity
 from proxy.entity_finder.regex_finder import RegexEntityFinder
 
@@ -214,10 +214,10 @@ def _detect_entities_ocr_batch(proxy: DLPProxy, texts: List[str], mappings: Mapp
         for text, entities in zip(texts, finder.find_entities_batch(texts, proxy.mappings)):
             if not text in accepted:
                 accepted[text] = []
-            accepted[text].extend([entity for entity in entities if not overlaps(entity, accepted[text])])
+            _add_non_overlapping(accepted[text], entities)
 
     return [
-        _merge_ocr_entities(standard, _ocr_lax_finder.find_entities(text, mappings))
+        _merge_ocr_entities(standard, _ocr_lax_finder.find_entities_batch([text], mappings))
         for text, standard in accepted.items()
     ]
 

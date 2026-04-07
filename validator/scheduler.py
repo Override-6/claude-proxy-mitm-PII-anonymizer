@@ -31,7 +31,7 @@ class ValidatorScheduler:
     def run_full_pipeline(self):
         """Execute the full validation pipeline: collect → finetune → test → select best."""
         # Import locally to avoid circular imports
-        from main import collect_disagreements, finetune_model, test_models
+        from validator.main import collect_disagreements, finetune_model, test_models
 
         timestamp = datetime.now().isoformat()
         log.info(f"[{timestamp}] Starting scheduled validator pipeline...")
