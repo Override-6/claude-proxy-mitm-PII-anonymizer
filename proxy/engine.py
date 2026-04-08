@@ -67,11 +67,17 @@ def expand_paths(obj: dict, expressions: list[str]) -> list[list[str | int]]:
         return []
 
 
-def get_values(obj: dict, paths: list[list]) -> list[str]:
+_MISSING = object()
+
+
+def get_values(obj: dict, paths: list[list]) -> list:
     """Extract values at the given paths using pure-Python traversal.
 
-    The previous jq-based implementation serialised the entire JSON body through
-    jq's C heap on every call.  Pure Python eliminates that allocation entirely.
+    Returns the raw value when the path resolves, or the _MISSING sentinel when
+    it doesn't. Callers must distinguish "missing" from "empty string" — writing
+    back to a missing path via set_values would CREATE the field (see the
+    thinking-block bug where jq's path() returns paths to fields that don't
+    exist on the object).
     """
     result = []
     for path in paths:
@@ -79,9 +85,9 @@ def get_values(obj: dict, paths: list[list]) -> list[str]:
             val = obj
             for key in path:
                 val = val[key]
-            result.append(val if isinstance(val, str) else "")
+            result.append(val)
         except (KeyError, IndexError, TypeError):
-            result.append("")
+            result.append(_MISSING)
     return result
 
 
@@ -145,7 +151,12 @@ async def _apply_paths(proxy: DLPProxy, data: dict, sensitive_fields: list[str] 
     paths = expand_paths(data, expressions)
     if not paths:
         return data
-    values = get_values(data, paths)
+    raw_values = get_values(data, paths)
+    # Coerce to strings for the entity pipeline, but remember which paths had
+    # a real string value so we only write those back (avoid creating fields
+    # at paths that don't actually exist — see deanon thinking-block bug).
+    values = [v if isinstance(v, str) else "" for v in raw_values]
+    writable = [isinstance(v, str) for v in raw_values]
 
     # Parallel list of entity lists indexed the same as paths/values.
     # Avoids using paths as dict keys (jq paths can contain dicts for complex expressions).
@@ -167,7 +178,9 @@ async def _apply_paths(proxy: DLPProxy, data: dict, sensitive_fields: list[str] 
         _add_non_overlapping(entities_list[i], entities)
 
     updates: list[tuple[list, str]] = []
-    for path_list, value, entities in zip(paths, values, entities_list):
+    for path_list, value, entities, ok in zip(paths, values, entities_list, writable):
+        if not ok:
+            continue
         cache.set_cached_entities(value, entities)
 
         # Log extracted entities for validator reuse (convert path list to string)

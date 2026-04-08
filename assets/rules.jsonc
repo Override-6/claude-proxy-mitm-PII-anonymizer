@@ -31,11 +31,14 @@
   "anonymise": {
     "requests": [
       // Messages API — create & count_tokens (api + a-api, v1)
+      // NOTE: .messages[].content[] with select(.type != "thinking") excludes thinking blocks —
+      //       their `signature` field must never be modified (cryptographic, API-validated) and
+      //       their `thinking` field is always empty on replay (by Anthropic API design).
       {
         "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/messages(/count_tokens)?",
         "sensitive_fields": [
           ".system[1:][].text",
-          ".messages[].content",
+          ".messages[].content[] | select(.type != \"thinking\") | .. | strings",
           ".tools[].description",
           ".tools[].input_schema | .. | objects | select(.description != null) | .description | strings"
         ]
@@ -46,11 +49,7 @@
         "sensitive_fields": [
           ".system[1:][].text",
           ".requests[].custom_id",
-          ".requests[].params.messages[].content",
-          ".requests[].params.messages[].content[].text",
-          ".requests[].params.messages[].content[].title",
-          ".requests[].params.messages[].content[].context",
-          ".requests[].params.messages[].content[].content"
+          ".requests[].params.messages[].content[] | select(.type != \"thinking\") | .. | strings"
         ]
       },
       // Legacy Completions API (api + a-api, v1)

@@ -1,8 +1,14 @@
 """
-Evaluator: Use Gemma 4 8B to validate WikiNEural NER predictions.
+Evaluator: Use a local BitNet LLM (via bitnet.cpp) to validate WikiNEural NER
+predictions.
 
 Compares predictions and generates ground truth labels for fine-tuning dataset.
 Uses pre-extracted entities from data/requests-entities.jsonl when available.
+
+The LLM backend is `validator.bitnet_client.BitnetClient`, which runs a
+persistent `llama-server` subprocess from bitnet.cpp. Quality is comparable to
+Llama-2-7B (BitNet-2B-4T) or Falcon3-7B (Falcon3-7B-1.58bit) while fitting
+comfortably in CPU RAM. See validator/bitnet_client.py for env vars.
 """
 
 import json
@@ -11,37 +17,24 @@ import re
 from pathlib import Path
 from typing import Generator
 
-from transformers import pipeline
-
 from proxy.entity_cache_log import get_cached_entities
+from validator.bitnet_client import BitnetClient
 
 log = logging.getLogger(__name__)
 
 
 class Evaluator:
-    """Use Gemma 4 to validate WikiNEural entity extraction."""
+    """Use a BitNet LLM to validate WikiNEural entity extraction."""
 
-    def __init__(self, entities_file: Path):
+    def __init__(self, entities_file: Path, llm: BitnetClient | None = None):
         self.entities_file = entities_file
 
         if not self.entities_file.exists():
             raise FileNotFoundError(f"Entity cache not found: {self.entities_file}")
 
-        import os
-        import torch
-        has_cuda = torch.cuda.is_available()
-        device = "auto" if has_cuda else "cpu"
-        dtype = torch.bfloat16 if has_cuda else torch.float32
-        log.info(f"Loading google/gemma-3-1b-it for evaluation ({'GPU' if has_cuda else 'CPU'})...")
-        # HF_TOKEN only needed on first download (host). In container the model
-        # is baked into the image at HF_HOME=/app/hf_cache — no token required.
-        self.gemma = pipeline(
-            "text-generation",
-            model="google/gemma-3-1b-it",
-            device_map=device,
-            dtype=dtype,
-            token=os.environ.get("HF_TOKEN"),
-        )
+        # Lazy: the server subprocess only starts on the first generate() call,
+        # so unit tests that only exercise helpers don't pay the startup cost.
+        self.llm = llm or BitnetClient()
 
     def _extract_text_fields(self, obj: dict, path_prefix: str = "") -> list[tuple[str, str]]:
         """
@@ -60,11 +53,10 @@ class Evaluator:
             for key, value in obj.items():
                 current_path = f"{path_prefix}.{key}" if path_prefix else key
 
-                if key in relevant_paths or "description" in key.lower() or "text" in key.lower():
-                    if isinstance(value, str) and len(value) > 20 and len(value) < 5000:
-                        texts.append((value, current_path))
-                    elif isinstance(value, (dict, list)):
-                        texts.extend(self._extract_text_fields(value, current_path))
+                if isinstance(value, str) and len(value) >= 10 and len(value) < 5000:
+                    texts.append((value, current_path))
+                elif isinstance(value, (dict, list)):
+                    texts.extend(self._extract_text_fields(value, current_path))
         elif isinstance(obj, list):
             for i, item in enumerate(obj):
                 texts.extend(self._extract_text_fields(item, f"{path_prefix}[{i}]"))
@@ -77,7 +69,7 @@ class Evaluator:
         markdown blocks, etc. Extract and validate all JSON objects, return
         the LAST valid one that has the required fields.
         """
-        required_fields = {"correct", "false_positives", "missed_entities", "confidence"}
+        required_fields = {"correct", "false_positives", "missed_entities"}
         valid_jsons = []
 
         # Find all potential JSON objects
@@ -112,9 +104,9 @@ class Evaluator:
         if valid_jsons:
             return valid_jsons[-1]
 
-        # Fallback to neutral response
+        # Fallback: no parseable JSON — treat as unknown (no FP/missed, so disagreement=0)
         log.debug(f"Failed to extract valid JSON from response: {response[:150]}")
-        return {"correct": True, "false_positives": [], "missed_entities": [], "confidence": "low"}
+        return {"correct": False, "false_positives": [], "missed_entities": [], "confidence": "low"}
 
     _VALID_ENTITY_TYPES = {"PERSON", "ORG", "LOC"}
     # Patterns that are clearly not PERSON/ORG/LOC names
@@ -189,8 +181,8 @@ class Evaluator:
         extracted_list = [f'"{e.text}" as {e.type}' for e in entities]
         extracted_str = ", ".join(extracted_list) if extracted_list else "no entities"
 
-        # Truncate text to 1024 chars to fit in model context
-        text_preview = text[:1024] + ("..." if len(text) > 1024 else "")
+        # Truncate text to 400 chars — keeps prompt under ~200 tokens total
+        text_preview = text[:400] + ("..." if len(text) > 400 else "")
 
         # Gemma is only used to VALIDATE (detect false positives).
         # It does NOT suggest missed entities — that direction causes hallucination
@@ -214,17 +206,16 @@ Respond with ONLY JSON:
 JSON:"""
 
         try:
-            response = self.gemma(
+            response_text = self.llm.generate(
                 prompt,
-                return_full_text=False,
-                max_new_tokens=200,
-                do_sample=False,  # Greedy decoding to minimize hallucination
+                max_tokens=120,
+                temperature=0.0,  # greedy, to minimize hallucination
+                stop=["\n\n", "```"],
             )
-            response_text = response[0]["generated_text"] if response else ""
             gemma_eval = self._parse_gemma_response(response_text)
             gemma_eval = self._validate_gemma_eval(gemma_eval, text)
         except Exception as e:
-            log.warning(f"Gemma evaluation failed: {e}")
+            log.warning(f"LLM evaluation failed: {e}")
             gemma_eval = {
                 "correct": True,
                 "false_positives": [],
@@ -311,22 +302,16 @@ After thinking through the analysis, provide ONLY a JSON response (nothing else 
   "confidence": "high|medium|low"
 }}"""
 
-        # Run Gemma
         try:
-            result = self.gemma(prompt, max_new_tokens=500)
-            response_text = result[0]["generated_text"]
-
-            # Extract the response (skip the prompt echo)
-            # Look for where JSON starts
-            if "{" in response_text:
-                # Find the last opening brace and start from there
-                json_start = response_text.rfind("{")
-                response_text = response_text[json_start:]
-
+            response_text = self.llm.generate(
+                prompt,
+                max_tokens=500,
+                temperature=0.0,
+            )
             gemma_eval = self._parse_gemma_response(response_text)
             gemma_eval = self._validate_gemma_eval(gemma_eval, text)
         except Exception as e:
-            log.warning(f"Gemma evaluation failed: {e}")
+            log.warning(f"LLM evaluation failed: {e}")
             gemma_eval = {
                 "correct": True,
                 "false_positives": [],
@@ -357,22 +342,29 @@ After thinking through the analysis, provide ONLY a JSON response (nothing else 
             "disagreement_score": disagreement,
         }
 
-    def evaluate_batch(self, limit: int = None) -> Generator[dict, None, None]:
+    def evaluate_batch(self, limit: int = None, max_entries: int = 500) -> Generator[dict, None, None]:
         """
         Process entities directly from requests-entities.jsonl.
         Evaluates already-extracted entities via Gemma.
         Yields disagreement samples for training dataset.
+
+        limit: max disagreements to collect (stops early when reached)
+        max_entries: max unique texts to evaluate (prevents unbounded runs when 0 disagreements)
         """
         log.info(f"Processing entities from {self.entities_file}")
 
         processed = 0
         skipped = 0
         disagreements = 0
+        evaluated = 0  # unique texts actually sent to LLM
         seen_texts: set[str] = set()
 
         with open(self.entities_file, "r") as f:
             for line in f:
                 if limit and disagreements >= limit:
+                    break
+                if max_entries and evaluated >= max_entries:
+                    log.info(f"[Stop] Reached max_entries={max_entries} LLM evaluations")
                     break
 
                 try:
@@ -399,6 +391,17 @@ After thinking through the analysis, provide ONLY a JSON response (nothing else 
                             log.info(f"[Progress] Processed: {processed}, Skipped: {skipped}, Disagreements: {disagreements}")
                         continue
 
+                    # Only validate NER entity types (WikiNEural output).
+                    # Presidio-detected types (PHONE, EMAIL, IP, etc.) are structural
+                    # and almost never wrong — skipping them avoids wasting LLM calls.
+                    _NER_TYPES = {"PERSON", "ORG", "LOC", "MISC"}
+                    ner_entities_list = [e for e in entities_list if e.get("type") in _NER_TYPES]
+                    if not ner_entities_list:
+                        skipped += 1
+                        if processed % 50 == 0:
+                            log.info(f"[Progress] Processed: {processed}, Skipped: {skipped}, Disagreements: {disagreements}")
+                        continue
+
                     # Convert to Entity-like objects
                     entities = [
                         type('Entity', (), {
@@ -407,7 +410,7 @@ After thinking through the analysis, provide ONLY a JSON response (nothing else 
                             'start': e.get('start', 0),
                             'end': e.get('end', 0)
                         })()
-                        for e in entities_list
+                        for e in ner_entities_list
                     ]
 
                     # Filter out pronouns/articles
@@ -422,6 +425,7 @@ After thinking through the analysis, provide ONLY a JSON response (nothing else 
 
                     # Only yield disagreements — these are the high-signal samples where
                     # WikiNEural was wrong. Correct samples don't improve fine-tuning.
+                    evaluated += 1
                     result = self._evaluate_entities(text, entities)
                     if result.get("disagreement_score", 0) > 0:
                         yield result
@@ -429,10 +433,10 @@ After thinking through the analysis, provide ONLY a JSON response (nothing else 
                         log.debug(f"[Disagreement {disagreements}] Score: {result['disagreement_score']:.2f}, Text: {text[:60]}...")
 
                     if processed % 50 == 0:
-                        log.info(f"[Progress] Processed: {processed}, Skipped: {skipped}, Disagreements: {disagreements}")
+                        log.info(f"[Progress] Processed: {processed}, Evaluated: {evaluated}, Skipped: {skipped}, Disagreements: {disagreements}")
 
                 except Exception as e:
                     log.warning(f"Error processing entity: {e}")
                     continue
 
-        log.info(f"[Complete] Total processed: {processed}, Skipped: {skipped}, Disagreements found: {disagreements}")
+        log.info(f"[Complete] Total processed: {processed}, Evaluated: {evaluated}, Skipped: {skipped}, Disagreements found: {disagreements}")

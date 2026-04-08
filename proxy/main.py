@@ -7,11 +7,13 @@ MITM Proxy for intercepting Claude Desktop traffic.
 import asyncio
 import json
 import os
+import re
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from mitmproxy import http
+from mitmproxy.proxy.layers.tls import ClientHelloData
 
 import proxy.engine as engine
 from proxy.anxious_filter import anxious_filter, trigger_anxious_filter
@@ -41,6 +43,47 @@ proxy = DLPProxy(
 
 # Thread pool for offloading blocking anonymisation work
 _executor = ThreadPoolExecutor(max_workers=4)
+
+
+# ---------------------------------------------------------------------------
+# TLS passthrough — only intercept hosts that appear in rules.jsonc
+# ---------------------------------------------------------------------------
+
+def _build_allowed_host_patterns(rules) -> list[re.Pattern]:
+    """
+    Extract host-only regex patterns from every URL pattern in rules.
+    Only HTTPS patterns matter — HTTP flows are never TLS-intercepted.
+    """
+    host_regexes: set[str] = set()
+    all_patterns = (
+        [r.url_pattern.pattern for r in rules.anonymise_requests]
+        + [r.url_pattern.pattern for r in rules.anonymise_responses]
+        + [r.url_pattern.pattern for r in rules.deanonymise_responses]
+        + [r.url_pattern.pattern for r in rules.blocked_urls]
+    )
+    for pat in all_patterns:
+        if pat.startswith("https://"):
+            host_part = pat[len("https://"):]
+            # Take the regex up to (but not including) the first literal slash
+            host_regex = host_part.split("/")[0]
+            host_regexes.add(host_regex)
+    return [re.compile(h) for h in host_regexes]
+
+
+_allowed_host_patterns = _build_allowed_host_patterns(proxy.rules)
+
+
+async def tls_clienthello(data: ClientHelloData) -> None:
+    """Pass through TLS for any host not covered by rules.jsonc."""
+    sni = data.client_hello.sni
+    if not sni:
+        return  # No SNI → unknown host, intercept (safe default)
+    for pattern in _allowed_host_patterns:
+        if pattern.fullmatch(sni):
+            return  # Whitelisted → intercept normally
+    # Host not in any rule → transparent passthrough (no cert substitution)
+    data.ignore_connection = True
+    # print(f"[proxy] TLS passthrough (not in rules): {sni}")
 
 
 # ---------------------------------------------------------------------------

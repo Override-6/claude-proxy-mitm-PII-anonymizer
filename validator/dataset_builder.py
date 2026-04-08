@@ -80,9 +80,9 @@ class DatasetBuilder:
 
         return tokens, labels
 
-    _VALID_ENTITY_TYPES = {"PERSON", "ORG", "LOC"}
+    _VALID_ENTITY_TYPES = {"PERSON", "ORG", "LOC", "EMAIL", "PHONE", "MISC"}
     _NON_NAME_PATTERNS = re.compile(
-        r"@|https?://|www\.|^\d{1,3}(\.\d{1,3}){3}|^\d+$|^\[|\.\.\."
+        r"@|https?://|www\.|^\d{1,3}(\.\d{1,3}){3}|^\d+$|\.\.\."
     )
     _TYPE_ALIASES = {
         "PER": "PERSON",
@@ -139,7 +139,9 @@ class DatasetBuilder:
             if not missed_type:
                 log.debug(f"Skipping missed entity with invalid type {raw_type!r}: {missed_text!r}")
                 continue
-            if self._NON_NAME_PATTERNS.search(missed_text):
+            # Only apply the non-name pattern filter for name-type entities (PERSON/ORG/LOC).
+            # EMAIL and PHONE legitimately contain characters like @ that the pattern rejects.
+            if missed_type in {"PERSON", "ORG", "LOC"} and self._NON_NAME_PATTERNS.search(missed_text):
                 log.debug(f"Skipping non-name missed entity: {missed_text!r}")
                 continue
             if missed_text not in text:
