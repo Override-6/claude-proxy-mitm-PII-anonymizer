@@ -6,9 +6,10 @@ services:
     command: serve
     ports:
       - "18080:18080"     # Coordination server (nginx proxies vpn.maxou.dev:443 → 18080)
+      - "3478:3478/udp"   # STUN (embedded DERP server)
     volumes:
-      - ./data/headscale/config:/etc/headscale
-      - ./data/headscale/data:/var/lib/headscale
+      - ./docker/headscale.yaml:/etc/headscale/config.yaml:ro
+      - ./data/headscale:/var/lib/headscale
     networks:
       - vpn
 
@@ -21,17 +22,23 @@ services:
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
     devices:
       - /dev/net/tun:/dev/net/tun
     volumes:
       - ./data/tailscale:/var/lib/tailscale
     environment:
-      - MITM_PROXY_HOST=mitm-proxy
       - MITM_PROXY_PORT=8080
-    depends_on:
-      - mitm-proxy
+      - HEADSCALE_URL=${HEADSCALE_URL:-https://vpn.maxou.dev}
+      - TS_HOSTNAME=${TS_HOSTNAME:-tailscale-exit}
+      - TS_AUTHKEY=${TS_AUTHKEY:-}   # set by headscale-setup.sh in .env
+    # Expose mitmproxy's ports through this container (shared network namespace)
+    ports:
+      - "8080:8080"
+      - "8000:8000"
     networks:
-      - proxy   # shares network with mitm-proxy so redsocks can reach mitm-proxy:8080
+      - proxy
 
   mitm-proxy:
     build:
@@ -40,6 +47,9 @@ services:
     image: claude-mitm-proxy:latest
     container_name: claude-mitm-proxy
     restart: unless-stopped
+    # Share tailscale's network namespace so SO_ORIGINAL_DST can see DNAT conntrack entries.
+    # Ports and network are defined on the tailscale service above.
+    network_mode: "service:tailscale"
     # Dual-mode: transparent proxy on 8080 (VPN traffic via tailscale DNAT) +
     #            reverse proxy on 8000 (MCP server traffic, deanon/anon)
     command: >
@@ -50,9 +60,6 @@ services:
       --set console_eventlog_verbosity=info
       --set flow_detail=0
       --set script_reload=false
-    ports:
-      - "8080:8080"
-      - "8000:8000"
 #      - "127.0.0.1:9999:9999" # use `docker compose exec poetry run python console.py` instead !
     volumes:
       # Persists mitmproxy CA cert across restarts.
@@ -86,9 +93,8 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=.
     depends_on:
+      - tailscale
       - google-workspace-mcp
-    networks:
-      - proxy
 
       #  validator:
       #    build:
@@ -152,6 +158,7 @@ services:
     build:
       context: .
       dockerfile: docker/gw-mcp.dockerfile
+    image: claude-pii-proxy-google-workspace-mcp:latest
     container_name: google-workspace-mcp
     restart: unless-stopped
     networks:

@@ -38,7 +38,19 @@ echo ""
 # ── 1. Ensure containers are running ────────────────────────────────────────
 echo "[1/6] Starting headscale and tailscale containers..."
 $COMPOSE up -d headscale tailscale
-sleep 3
+
+echo "      waiting for headscale to be healthy..."
+for i in $(seq 1 30); do
+    if curl -sf http://localhost:18080/health &>/dev/null; then
+        echo "      headscale is healthy"
+        break
+    fi
+    sleep 1
+    if [[ $i -eq 30 ]]; then
+        echo "ERROR: headscale did not become healthy in 30s" >&2
+        exit 1
+    fi
+done
 
 for svc in headscale tailscale; do
     if ! $COMPOSE ps "$svc" 2>/dev/null | grep -qE "running|Up"; then
@@ -51,7 +63,9 @@ echo "      both containers are up"
 
 # ── 2. Create headscale user (idempotent) ────────────────────────────────────
 echo "[2/6] Ensuring headscale user '${HEADSCALE_USER}' exists..."
-if $COMPOSE exec -T headscale headscale users list 2>/dev/null | grep -qE "[[:space:]]${HEADSCALE_USER}[[:space:]]"; then
+USER_EXISTS=$($COMPOSE exec -T headscale headscale users list -o json 2>/dev/null \
+    | python3 -c "import json,sys; users=json.load(sys.stdin); print('yes' if any(u['name']=='${HEADSCALE_USER}' for u in users) else 'no')")
+if [[ "$USER_EXISTS" == "yes" ]]; then
     echo "      user already exists"
 else
     $COMPOSE exec -T headscale headscale users create "${HEADSCALE_USER}"
@@ -60,17 +74,35 @@ fi
 
 # ── 3. Generate pre-auth key ─────────────────────────────────────────────────
 echo "[3/6] Generating pre-auth key (reusable, 168h)..."
+USER_ID=$($COMPOSE exec -T headscale headscale users list -o json 2>/dev/null \
+    | python3 -c "import json,sys; users=json.load(sys.stdin); print(next(u['id'] for u in users if u['name']=='${HEADSCALE_USER}'))")
+if [[ -z "$USER_ID" ]]; then
+    echo "ERROR: could not find user ID for '${HEADSCALE_USER}'" >&2
+    exit 1
+fi
+echo "      user ID: ${USER_ID}"
 AUTHKEY=$($COMPOSE exec -T headscale headscale preauthkeys create \
-    --user "${HEADSCALE_USER}" \
+    --user "${USER_ID}" \
     --reusable \
     --expiration 168h \
-    | grep -oE '[a-f0-9]{40,}' | head -1)
+    -o json 2>/dev/null \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])")
 
 if [[ -z "$AUTHKEY" ]]; then
     echo "ERROR: could not extract auth key from headscale output" >&2
     exit 1
 fi
-echo "      key: ${AUTHKEY:0:8}…"
+echo "      authkey: ${AUTHKEY:0:12}…"
+
+# Save to .env so container self-authenticates on reboot
+ENV_FILE="$(pwd)/.env"
+touch "$ENV_FILE"
+if grep -q "^TS_AUTHKEY=" "$ENV_FILE"; then
+    sed -i "s|^TS_AUTHKEY=.*|TS_AUTHKEY=${AUTHKEY}|" "$ENV_FILE"
+else
+    echo "TS_AUTHKEY=${AUTHKEY}" >> "$ENV_FILE"
+fi
+echo "      saved to .env"
 
 # ── 4. Run tailscale up inside the running container ─────────────────────────
 echo "[4/6] Authenticating tailscale (exec into container)..."
@@ -79,6 +111,7 @@ $COMPOSE exec -T tailscale tailscale up \
     --authkey="${AUTHKEY}" \
     --advertise-exit-node \
     --accept-routes \
+    --accept-dns=false \
     --hostname="${TS_HOSTNAME}"
 echo "      tailscale up done"
 
@@ -107,19 +140,27 @@ if [[ $NODE_FOUND -eq 0 ]]; then
 fi
 echo "      node '${TS_HOSTNAME}' registered"
 
-echo "      approving exit-node routes..."
-ROUTE_IDS=$($COMPOSE exec -T headscale headscale routes list 2>/dev/null \
-    | awk '/0\.0\.0\.0\/0|::\/0/ {print $1}')
+# Get node ID
+NODE_ID=$($COMPOSE exec -T headscale headscale nodes list -o json 2>/dev/null \
+    | python3 -c "import json,sys; nodes=json.load(sys.stdin); print(next(n['id'] for n in nodes if n.get('givenName')==\"${TS_HOSTNAME}\" or n.get('name','').startswith(\"${TS_HOSTNAME}\")))")
+echo "      node ID: ${NODE_ID}"
 
-if [[ -z "$ROUTE_IDS" ]]; then
-    echo "      no routes yet — re-run to approve later, or:"
-    echo "      docker compose exec headscale headscale routes list"
-    echo "      docker compose exec headscale headscale routes enable -r <id>"
+echo "      approving exit-node routes..."
+ROUTES=$($COMPOSE exec -T headscale headscale nodes list-routes --identifier "${NODE_ID}" -o json 2>/dev/null \
+    | python3 -c "
+import json, sys
+nodes = json.load(sys.stdin)
+node = nodes[0] if isinstance(nodes, list) else nodes
+exit_routes = [r for r in node.get('available_routes', []) if r in ('0.0.0.0/0', '::/0')]
+print(','.join(exit_routes))
+")
+
+if [[ -z "$ROUTES" ]]; then
+    echo "      no exit-node routes advertised yet — re-run to approve later"
 else
-    while IFS= read -r rid; do
-        $COMPOSE exec -T headscale headscale routes enable -r "$rid" 2>/dev/null \
-            && echo "      route $rid enabled"
-    done <<< "$ROUTE_IDS"
+    $COMPOSE exec -T headscale headscale nodes approve-routes \
+        --identifier "${NODE_ID}" --routes "${ROUTES}" 2>/dev/null \
+        && echo "      routes approved: ${ROUTES}"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
