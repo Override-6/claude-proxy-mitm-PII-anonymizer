@@ -21,7 +21,7 @@ class MappingsEntityFinder(AbstractEntityFinder):
         t0 = time.time()
         try:
             for text in texts:
-                text_lower = text
+                text_lower = text.lower()
                 entities: List[Entity] = []
                 for end_idx, length in automaton.iter(text_lower):
                     start = end_idx - length + 1
