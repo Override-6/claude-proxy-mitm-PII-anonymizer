@@ -151,12 +151,19 @@ class NEREntityFinder(AbstractEntityFinder):
 
         try:
             def _gen():
+                # Lowercase matches the model's training distribution (lowercased Wikipedia).
+                # lower() is position-preserving for ASCII, so offsets returned by the
+                # pipeline are valid indices into the original chunk_text.
                 for _, chunk_text, _ in chunk_meta:
-                    yield chunk_text
+                    yield chunk_text.lower()
 
             with self._lock:
                 for chunk_i, groups in enumerate(self._pipe(_gen(), batch_size=32)):
                     text_idx, chunk_text, offset = chunk_meta[chunk_i]
+                    # _to_entities receives the ORIGINAL (non-lowercased) chunk so that
+                    # span_text preserves the original casing (e.g. "Charlie Kirk" not
+                    # "charlie kirk"), while the character offsets from the lowercased
+                    # pipeline output are still correct.
                     for entity in self._to_entities(groups, chunk_text, text_offset=offset):
                         key = (entity.start, entity.end)
                         if key not in seen_spans[text_idx]:
