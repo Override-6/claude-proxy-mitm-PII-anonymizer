@@ -20,6 +20,8 @@ if ! ip link show tailscale0 &>/dev/null; then
 fi
 
 echo "[post-auth] applying DNAT + MASQUERADE rules..."
+# Note: net.ipv4.conf.all.route_localnet=1 is set via docker-compose sysctls so that
+# DNAT to 127.0.0.1 (mitmproxy) works for packets arriving on tailscale0.
 # DNAT to loopback: mitmproxy runs in the same network namespace (network_mode: service:tailscale),
 # so SO_ORIGINAL_DST works correctly and there is no cross-namespace conntrack problem.
 iptables -t nat -A PREROUTING -i tailscale0 -p tcp --dport 80  -j DNAT --to-destination "127.0.0.1:${MITM_PROXY_PORT}"

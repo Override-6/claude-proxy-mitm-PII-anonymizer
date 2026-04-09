@@ -24,6 +24,10 @@ services:
       - SYS_MODULE
     sysctls:
       - net.ipv4.ip_forward=1
+      # Allow DNAT to 127.0.0.1 from non-loopback interfaces (tailscale0).
+      # Without this, the kernel drops packets arriving on tailscale0 after
+      # iptables rewrites their destination to 127.x.x.x (mitmproxy).
+      - net.ipv4.conf.all.route_localnet=1
     devices:
       - /dev/net/tun:/dev/net/tun
     volumes:
@@ -52,6 +56,10 @@ services:
     restart: unless-stopped
     # Share tailscale's network namespace so SO_ORIGINAL_DST can see DNAT conntrack entries.
     # Ports and network are defined on the tailscale service above.
+    # depends_on ensures mitm-proxy is restarted after tailscale (which resets the netns).
+    depends_on:
+      tailscale:
+        condition: service_started
     network_mode: "service:tailscale"
     # Dual-mode: transparent proxy on 8080 (VPN traffic via tailscale DNAT) +
     #            reverse proxy on 8000 (MCP server traffic, deanon/anon)
@@ -95,9 +103,6 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=.
-    depends_on:
-      - tailscale
-      - google-workspace-mcp
 
       #  validator:
       #    build:

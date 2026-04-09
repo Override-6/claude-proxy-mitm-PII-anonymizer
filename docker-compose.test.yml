@@ -1,0 +1,48 @@
+# Local test client — routes all traffic through the tailscale-exit node on the VPS,
+# which transparently intercepts it with mitmproxy.
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   docker compose -f docker-compose.test.yml exec ts-test-curl curl https://bridge.claudeusercontent.com/
+#
+# Requirements:
+#   .env must contain:
+#     HEADSCALE_URL=https://vpn.maxou.dev
+#     TS_AUTHKEY=<reusable authkey from headscale>   # same key used by the VPS tailscale service
+#
+# CA cert (./data/mitmproxy/mitmproxy-ca-cert.pem) is mounted and trusted at startup.
+# Fetch it from the VPS if missing:
+#   scp maxou.dev:/srv/Projects/freelance/mateo/claude-pii-proxy/data/mitmproxy/mitmproxy-ca-cert.pem data/mitmproxy/
+
+services:
+  ts-test-curl:
+    build:
+      context: .
+      dockerfile: docker/ts-test.dockerfile
+    image: ts-test-curl:latest
+    container_name: ts-test
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    dns:
+      - 8.8.8.8
+    volumes:
+      - ts-test-state:/var/lib/tailscale
+      - ./data/mitmproxy/mitmproxy-ca-cert.pem:/etc/mitmproxy-ca/mitmproxy-ca-cert.pem:ro
+    environment:
+      - HEADSCALE_URL=${HEADSCALE_URL:-https://vpn.maxou.dev}
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_HOSTNAME=${TS_HOSTNAME:-ts-test-curl}
+      - TS_EXIT_NODE=${TS_EXIT_NODE:-100.64.0.1}
+    command: sleep infinity
+
+volumes:
+  ts-test-state:
+    # Named volume persists tailscale state (auth session, exit node config)
+    # across container restarts and rebuilds.
+    name: ts-test-state
