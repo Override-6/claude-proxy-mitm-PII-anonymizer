@@ -16,6 +16,7 @@ echo "[tailscale] starting tailscaled..."
 tailscaled \
     --state=/var/lib/tailscale/tailscaled.state \
     --socket=/var/run/tailscale/tailscaled.sock \
+    --port=41641 \
     &
 TAILSCALED_PID=$!
 

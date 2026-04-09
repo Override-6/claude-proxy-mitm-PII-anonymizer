@@ -33,10 +33,13 @@ services:
       - HEADSCALE_URL=${HEADSCALE_URL:-https://vpn.maxou.dev}
       - TS_HOSTNAME=${TS_HOSTNAME:-tailscale-exit}
       - TS_AUTHKEY=${TS_AUTHKEY:-}   # set by headscale-setup.sh in .env
-    # Expose mitmproxy's ports through this container (shared network namespace)
+    # Expose mitmproxy's ports through this container (shared network namespace).
+    # Also publish the WireGuard port so inbound UDP always reaches the container
+    # (otherwise Docker only tracks outbound conntrack entries which expire on restart).
     ports:
       - "8080:8080"
       - "8000:8000"
+      - "41641:41641/udp"
     networks:
       - proxy
 
