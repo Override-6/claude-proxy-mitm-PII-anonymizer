@@ -28,6 +28,8 @@ services:
       # Without this, the kernel drops packets arriving on tailscale0 after
       # iptables rewrites their destination to 127.x.x.x (mitmproxy).
       - net.ipv4.conf.all.route_localnet=1
+      # IPv6 forwarding for exit-node clients (no-op if Docker IPv6 is disabled).
+      - net.ipv6.conf.all.forwarding=1
     devices:
       - /dev/net/tun:/dev/net/tun
     volumes:
