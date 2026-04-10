@@ -230,6 +230,8 @@ async def _anonymize_base64_images(proxy: DLPProxy, data: dict) -> dict:
                         )
                     except Exception as e:
                         log.warning(f"[anonymizer] Failed to anonymize base64 image: {e}")
+                        raise e
+
             else:
                 # Recurse into all values
                 for value in obj.values():
@@ -323,8 +325,9 @@ async def _anonymize_multipart(proxy: DLPProxy, content: bytes, content_type: st
                 anonymized_body, _ = anonymize_image(part_body, proxy)
                 result_parts.append(b'\r\n' + part_headers + b'\r\n\r\n' + anonymized_body + suffix)
             except Exception as e:
-                print(f"[anonymizer] WARNING: image anonymization failed: {e}")
-                result_parts.append(raw_part)
+                print(f"[anonymizer] WARNING: image anonymization failed! rethrowing error")
+                # result_parts.append(raw_part)
+                raise e
         else:
             result_parts.append(raw_part)
 

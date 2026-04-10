@@ -34,10 +34,10 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-from proxy.mappings import Mappings
 from proxy.engine import DLPProxy, _add_non_overlapping  # DLPProxy imported for type reference in anonymize_image
 from proxy.entity_finder import Entity
 from proxy.entity_finder.regex_finder import RegexEntityFinder
+from proxy.mappings import Mappings
 
 log = logging.getLogger(__name__)
 
@@ -216,18 +216,21 @@ def _detect_entities_ocr_batch(proxy: DLPProxy, texts: List[str], mappings: Mapp
                 accepted[text] = []
             _add_non_overlapping(accepted[text], entities)
 
-    return [
-        _merge_ocr_entities(standard, _ocr_lax_finder.find_entities_batch([text], mappings))
-        for text, standard in accepted.items()
-    ]
+    laxes = list(_ocr_lax_finder.find_entities_batch(texts, proxy.mappings))
+
+    return _merge_ocr_entities(list(accepted.values()), laxes)
 
 
-def _merge_ocr_entities(standard: List[Entity], lax: List[Entity]) -> List[Entity]:
+def _merge_ocr_entities(standard: List[List[Entity]], lax: List[List[Entity]]) -> List[List[Entity]]:
     """Merge standard + lax entity lists, dropping lax duplicates."""
-    covered = {(e.start, e.end) for e in standard}
-    extra = [e for e in lax if (e.start, e.end) not in covered
-             and not any(s.start <= e.start and e.end <= s.end for s in standard)]
-    return standard + extra
+
+    def _merge_ocr_entities_sub(standard: List[Entity], lax: List[Entity]) -> List[Entity]:
+        covered = {(e.start, e.end) for e in standard}
+        extra = [e for e in lax if (e.start, e.end) not in covered
+                 and not any(s.start <= e.start and e.end <= s.end for s in standard)]
+        return standard + extra
+
+    return [_merge_ocr_entities_sub(standard, lax) for standard, lax in zip(standard, lax)]
 
 
 # Singleton reader — loaded once, reused for every call
