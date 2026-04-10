@@ -50,57 +50,57 @@ services:
       - proxy
 
 
-  #  mitm-proxy-explicit:
-  #    build:
-  #      context: .
-  #      dockerfile: docker/proxy.dockerfile
-  #    profiles:
-  #      - explicit
-  #    image: claude-mitm-proxy:latest
-  #    container_name: claude-mitm-proxy-explicit
-  #    command: >
-  #      poetry run mitmdump
-  #      -s proxy/main.py
-  #      --mode regular@0.0.0.0:8080
-  #      --mode reverse:http://mcp-servers:8000@0.0.0.0:8000
-  #      --set console_eventlog_verbosity=info
-  #      --set flow_detail=0
-  #      --set script_reload=false
-  #    #      - "127.0.0.1:9999:9999" # use `docker compose exec poetry run python console.py` instead !
-  #    volumes:
-  #      # Persists mitmproxy CA cert across restarts.
-  #      # The cert at ./data/mitmproxy-ca-cert.pem must be installed on every
-  #      # client machine that routes traffic through this proxy.
-  #      # === CRITICAL: Mount host caches to avoid re-downloading dependencies ===
-  #      # pip cache (wheels, build artifacts) — shared between host and container
-  #      - ~/.cache/pip:/root/.cache/pip:delegated
-  #      # poetry cache — shared between host and container
-  #      - ~/.cache/pypoetry:/root/.cache/pypoetry:delegated
-  #      # HuggingFace models — shared between host and container
-  #      - ~/.cache/huggingface:/root/.cache/huggingface:delegated
-  #      # EasyOCR models — shared between host and container
-  #      - ~/.EasyOCR:/root/.EasyOCR:delegated
-  #
-  #      # === Application data ===
-  #      # Persists mitmproxy CA cert across restarts.
-  #      - ./data/mitmproxy:/root/.mitmproxy
-  #      # Runtime config — edit without rebuilding
-  #      - ./assets:/app/assets:ro
-  #      # Persistent cache and audit log
-  #      - ./data/cache:/app/cache
-  #      - ./data/ignore:/app/ignore
-  #      # Mount source code so code changes take effect without rebuilding the image
-  #      - ./proxy:/app/proxy
-  #      # All /app/data output (redacted images, request log, …)
-  #      - ./data:/app/data
-  #      # Fine-tuned NER models
-  #      - ./models:/app/models
-  #    ports:
-  #      - "8080:8080"
-  #      - "8000:8000"
-  #    environment:
-  #      - PYTHONUNBUFFERED=1
-  #      - PYTHONPATH=.
+  mitm-proxy-explicit:
+    build:
+      context: .
+      dockerfile: docker/proxy.dockerfile
+    profiles:
+      - explicit
+    image: claude-mitm-proxy:latest
+    container_name: claude-mitm-proxy-explicit
+    command: >
+      poetry run mitmdump
+      -s proxy/main.py
+      --mode regular@0.0.0.0:8080
+      --mode reverse:http://mcp-servers:8000@0.0.0.0:8000
+      --set console_eventlog_verbosity=info
+      --set flow_detail=0
+      --set script_reload=false
+    #      - "127.0.0.1:9999:9999" # use `docker compose exec poetry run python console.py` instead !
+    volumes:
+      # Persists mitmproxy CA cert across restarts.
+      # The cert at ./data/mitmproxy-ca-cert.pem must be installed on every
+      # client machine that routes traffic through this proxy.
+      # === CRITICAL: Mount host caches to avoid re-downloading dependencies ===
+      # pip cache (wheels, build artifacts) — shared between host and container
+      - ~/.cache/pip:/root/.cache/pip:delegated
+      # poetry cache — shared between host and container
+      - ~/.cache/pypoetry:/root/.cache/pypoetry:delegated
+      # HuggingFace models — shared between host and container
+      - ~/.cache/huggingface:/root/.cache/huggingface:delegated
+      # EasyOCR models — shared between host and container
+      - ~/.EasyOCR:/root/.EasyOCR:delegated
+
+      # === Application data ===
+      # Persists mitmproxy CA cert across restarts.
+      - ./data/mitmproxy:/root/.mitmproxy
+      # Runtime config — edit without rebuilding
+      - ./assets:/app/assets:ro
+      # Persistent cache and audit log
+      - ./data/cache:/app/cache
+      - ./data/ignore:/app/ignore
+      # Mount source code so code changes take effect without rebuilding the image
+      - ./proxy:/app/proxy
+      # All /app/data output (redacted images, request log, …)
+      - ./data:/app/data
+      # Fine-tuned NER models
+      - ./models:/app/models
+    ports:
+      - "8080:8080"
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=.
 
 
   mitm-proxy:

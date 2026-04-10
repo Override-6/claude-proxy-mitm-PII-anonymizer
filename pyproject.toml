@@ -18,11 +18,14 @@ numpy = ">=2.0.0"
 pyahocorasick = "^2.3.0"
 transformers = {extras = ["torch"], version = "^5.4.0"}
 pytest = "^9.0.2"
+pytesseract = "^0.3.13"
 # Validator dependencies
 apscheduler = ">=3.10.0"
 datasets = ">=4.0.0"
 accelerate = ">=1.1.0"
 seqeval = ">=1.2.0"
+paddleocr = "^3.4.0"
+# paddlepaddle is installed via pip in the Dockerfile — poetry can't resolve its platform wheels
 
 [build-system]
 requires = ["poetry-core"]

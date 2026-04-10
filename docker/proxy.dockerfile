@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender-dev \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -21,6 +22,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     --mount=type=cache,target=/root/.cache/pypoetry,sharing=locked \
     pip install --no-cache-dir poetry && \
     poetry config virtualenvs.in-project true && \
+    poetry lock && \
     poetry install --no-root --no-cache
 
 # PHASE 2: Copy source code (doesn't invalidate dependency cache thanks to .dockerignore)
@@ -31,12 +33,14 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     --mount=type=cache,target=/root/.cache/pypoetry,sharing=locked \
     poetry install --no-cache
 
+# paddlepaddle has platform-specific wheels that poetry can't resolve — install via pip
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    poetry run pip install paddlepaddle
+
 # Pre-download models (cached on host via docker-compose volume mounts)
 RUN --mount=type=cache,target=/root/.cache/huggingface,sharing=locked \
     poetry run python -m spacy download en_core_web_lg || true
 
-RUN --mount=type=cache,target=/root/.EasyOCR,sharing=locked \
-    poetry run python -c "import easyocr; easyocr.Reader(['en', 'fr'], gpu=False)" || true
 
 EXPOSE 8080
 

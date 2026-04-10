@@ -154,8 +154,6 @@ async def _apply_paths(proxy: DLPProxy, data: dict, sensitive_fields: list[str] 
         return data
     raw_values = get_values(data, paths)
 
-    print("[DEBUG] raw_values =", raw_values)
-
     # Coerce to strings for the entity pipeline, but remember which paths had
     # a real string value so we only write those back (avoid creating fields
     # at paths that don't actually exist — see deanon thinking-block bug).
