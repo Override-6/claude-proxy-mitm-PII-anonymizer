@@ -1,5 +1,4 @@
 import base64
-import gc
 import json
 import logging
 import re
@@ -9,11 +8,11 @@ from dataclasses import dataclass
 import jq
 from mitmproxy.http import Headers
 
-from proxy import claude_system_prompt
 from proxy import cache
+from proxy import claude_system_prompt
+from proxy.entity_finder import AbstractEntityFinder, Entity
 from proxy.entity_finder.mappings_finder import MappingsEntityFinder
 from proxy.mappings import Mappings
-from proxy.entity_finder import AbstractEntityFinder, Entity
 from proxy.rules import ProxyRules, AnonymiseRule
 
 log = logging.getLogger(__name__)
@@ -45,8 +44,8 @@ def expand_paths(obj: dict, expressions: list[str]) -> list[list[str | int]]:
     """Find all paths to string leaves matching any of the given jq expressions.
 
     All expressions are merged into a single jq call so the full document is
-    serialised through jq's C heap only ONCE per request (previously once per
-    expression). The compiled jq program is cached for the lifetime of the
+    serialised through jq's C heap only ONCE per request.
+    The compiled jq program is cached for the lifetime of the
     process so compilation cost is paid only once per unique rule set.
     """
     key = tuple(expressions)
@@ -56,7 +55,7 @@ def expand_paths(obj: dict, expressions: list[str]) -> list[list[str | int]]:
         else:
             # Combine all expressions into one generator inside path() so jq
             # traverses the document once.
-            combined = ", ".join(f"({e} | .. | strings)" for e in expressions)
+            combined = ", ".join(f"({e} | .. | strings)?" for e in expressions)
             prog_src = f"[path({combined})] | unique"
         _compiled_expand[key] = jq.compile(prog_src)
 
@@ -73,7 +72,8 @@ _MISSING = object()
 def get_values(obj: dict, paths: list[list]) -> list:
     """Extract values at the given paths using pure-Python traversal.
 
-    Returns the raw value when the path resolves, or the _MISSING sentinel when
+    Returns the raw va
+    lue when the path resolves, or the _MISSING sentinel when
     it doesn't. Callers must distinguish "missing" from "empty string" — writing
     back to a missing path via set_values would CREATE the field (see the
     thinking-block bug where jq's path() returns paths to fields that don't
@@ -148,10 +148,14 @@ async def _apply_paths(proxy: DLPProxy, data: dict, sensitive_fields: list[str] 
     from entity_cache_log import log_extracted_entities
 
     expressions = ["."] if sensitive_fields is True else sensitive_fields
+
     paths = expand_paths(data, expressions)
     if not paths:
         return data
     raw_values = get_values(data, paths)
+
+    print("[DEBUG] raw_values =", raw_values)
+
     # Coerce to strings for the entity pipeline, but remember which paths had
     # a real string value so we only write those back (avoid creating fields
     # at paths that don't actually exist — see deanon thinking-block bug).
@@ -170,7 +174,8 @@ async def _apply_paths(proxy: DLPProxy, data: dict, sensitive_fields: list[str] 
     # Run all finders on non-cached texts
     if non_cached_values:
         for finder in proxy.finders:
-            for list_idx, entities in zip(non_cached_indices, finder.find_entities_batch(non_cached_values, proxy.mappings)):
+            for list_idx, entities in zip(non_cached_indices,
+                                          finder.find_entities_batch(non_cached_values, proxy.mappings)):
                 _add_non_overlapping(entities_list[list_idx], entities)
 
     # Run MappingsEntityFinder on all texts to catch re-occurrences of known sensitive values
@@ -207,8 +212,8 @@ async def _anonymize_base64_images(proxy: DLPProxy, data: dict) -> dict:
         if isinstance(obj, dict):
             # Check if this is an image content block with base64 source
             if (obj.get("type") == "image" and
-                isinstance(obj.get("source"), dict) and
-                obj["source"].get("type") == "base64"):
+                    isinstance(obj.get("source"), dict) and
+                    obj["source"].get("type") == "base64"):
 
                 source = obj["source"]
                 b64_data = source.get("data", "")
@@ -238,15 +243,15 @@ async def _anonymize_base64_images(proxy: DLPProxy, data: dict) -> dict:
 
 
 _REDACTED_RE_BYTES = re.compile(rb'\[[A-Z_]+_\d+\]')
-_REDACTED_RE_STR  = re.compile(r'\[[A-Z_]+_\d+\]')
+_REDACTED_RE_STR = re.compile(r'\[[A-Z_]+_\d+\]')
 
 
 def _log_anonymization_diff(raw: bytes, new_content: str) -> None:
     # Scan for tokens on the raw bytes directly — avoids keeping a separate
     # re-serialised 'original' string alongside the parsed body dict.
     orig_tokens = {m.group(0).decode() for m in _REDACTED_RE_BYTES.finditer(raw)}
-    new_tokens  = set(_REDACTED_RE_STR.findall(new_content))
-    injected    = new_tokens - orig_tokens
+    new_tokens = set(_REDACTED_RE_STR.findall(new_content))
+    injected = new_tokens - orig_tokens
     if len(new_content) == len(raw) and not injected:
         print(f"[anonymizer] WARNING: body unchanged after anonymization ({len(raw)} bytes)")
         return
