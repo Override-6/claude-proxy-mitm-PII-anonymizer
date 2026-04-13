@@ -265,7 +265,12 @@ def _log_anonymization_diff(raw: bytes, new_content: str) -> None:
 
 
 async def _apply_rule_json(proxy: DLPProxy, raw: bytes, sensitive_fields: list[str] | bool, url: str) -> bytes:
-    body = json.loads(raw)
+    if not raw or not raw.strip():
+        return raw
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
     # Do NOT keep a json.dumps(body) 'original' here — for large conversations
     # that extra string is 1× body size in memory alongside the parsed dict
     # (3-5×) and the final new_content (1×), pushing peak to 6-7× body size.
