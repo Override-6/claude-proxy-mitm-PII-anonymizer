@@ -6,8 +6,11 @@ Each connection sends one command and receives one JSON response, then closes.
 
 import asyncio
 import json
+import logging
 
 from proxy.engine import DLPProxy
+
+log = logging.getLogger(__name__)
 
 CONTROL_HOST = "0.0.0.0"
 CONTROL_PORT = 9999
@@ -47,5 +50,5 @@ async def init_control_socket(proxy: DLPProxy):
         CONTROL_HOST,
         CONTROL_PORT,
     )
-    print(f"[control] TCP socket listening on {CONTROL_HOST}:{CONTROL_PORT}")
+    log.info("Control socket listening on %s:%d", CONTROL_HOST, CONTROL_PORT)
     asyncio.get_event_loop().create_task(server.serve_forever())

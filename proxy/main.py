@@ -6,9 +6,9 @@ MITM Proxy for intercepting Claude Desktop traffic.
 """
 import asyncio
 import json
+import logging
 import os
 import re
-import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -25,6 +25,8 @@ from proxy.entity_finder.ner_finder import NEREntityFinder
 from proxy.entity_finder.presidio_finder import PresidioEntityFinder
 from proxy.mappings import Mappings
 from proxy.rules import load_rules
+
+log = logging.getLogger("proxy")
 
 proxy = DLPProxy(
     mappings=Mappings(),
@@ -91,6 +93,12 @@ async def tls_clienthello(data: ClientHelloData) -> None:
 # ---------------------------------------------------------------------------
 
 async def running():
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logging.getLogger("proxy").setLevel(logging.DEBUG)
     init_entities_log()  # Initialize entity cache log for validator
     await init_control_socket(proxy)
     start_cache_prune_task()
@@ -125,7 +133,7 @@ def _log_request(flow: http.HTTPFlow) -> None:
             # meta ends with "}" — insert "body" before the closing brace.
             f.write(meta[:-1] + ', "body": ' + body_str + '}\n')
     except Exception as e:
-        print(f"[proxy] Could not log request: {e}")
+        log.error("Could not log request: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +150,7 @@ async def request(flow: http.HTTPFlow):
         # Block blacklisted URLs
         for blocked in proxy.rules.blocked_urls:
             if blocked.url_pattern.fullmatch(url):
-                print(f"[proxy] BLOCKED: {url}")
+                log.warning("BLOCKED: %s", url)
                 flow.response = http.Response.make(
                     403,
                     "Blocked by proxy: this endpoint is not allowed.",
@@ -161,8 +169,7 @@ async def request(flow: http.HTTPFlow):
                 if new_content is not None:
                     flow.request.set_content(new_content)
             except Exception as e:
-                print(f"[proxy] Error deanonymizing MCP request: {e}")
-                traceback.print_exc()
+                log.error("Error deanonymizing MCP request: %s", e, exc_info=True)
                 flow.response = http.Response.make(
                     502,
                     "Bad Gateway: proxy processing error",
@@ -184,8 +191,7 @@ async def request(flow: http.HTTPFlow):
             if new_content is not None:
                 flow.request.set_content(new_content)
         except Exception as e:
-            print(f"[proxy] Error anonymizing request: {e}")
-            traceback.print_exc()
+            log.error("Error anonymizing request: %s", e, exc_info=True)
             flow.response = http.Response.make(
                 502,
                 "Bad Gateway: proxy processing error",
@@ -201,13 +207,11 @@ async def request(flow: http.HTTPFlow):
                 if triggered:
                     trigger_anxious_filter(url, flow, entities)
         except Exception as e:
-            print(f"[proxy] Error in anxious filter: {e}")
-            traceback.print_exc()
+            log.error("Error in anxious filter: %s", e, exc_info=True)
             # Don't block request on anxious filter error, just log it
 
     except Exception as e:
-        print(f"[proxy] Unexpected error in request processing: {e}")
-        traceback.print_exc()
+        log.error("Unexpected error in request processing: %s", e, exc_info=True)
         flow.response = http.Response.make(
             502,
             "Bad Gateway: proxy processing error",
@@ -230,8 +234,7 @@ async def responseheaders(flow: http.HTTPFlow):
 
         flow.response.stream = make_deanon_chunk(proxy, sse_fields)
     except Exception as e:
-        print(f"[proxy] Error in responseheaders: {e}")
-        traceback.print_exc()
+        log.error("Error in responseheaders: %s", e, exc_info=True)
 
 
 async def response(flow: http.HTTPFlow):
@@ -243,16 +246,15 @@ async def response(flow: http.HTTPFlow):
             body = content.decode("utf-8", errors="ignore") if content else ""
             req_content = flow.request.get_content()
             req_body = req_content.decode("utf-8", errors="ignore") if req_content else ""
-            print(f"[proxy] {flow.response.status_code} from {flow.request.pretty_url}")
-            print(f"[proxy] Response: {body}")
+            log.warning("HTTP %d from %s — %s", flow.response.status_code, flow.request.pretty_url, body[:200])
             try:
                 _IGNORE_DIR.mkdir(parents=True, exist_ok=True)
                 dump_path = _IGNORE_DIR / f"last_{flow.response.status_code}_body.json"
                 with open(dump_path, "w") as f:
                     f.write(req_body)
-                print(f"[proxy] Full request body saved to {dump_path}")
+                log.debug("Full request body saved to %s", dump_path)
             except Exception as e:
-                print(f"[proxy] Could not save error body: {e}")
+                log.error("Could not save error body: %s", e)
 
         # MCP reverse proxy: anonymize tool results before they reach Claude
         if any(r.url_pattern.fullmatch(url) for r in proxy.rules.anonymise_responses):
@@ -267,8 +269,7 @@ async def response(flow: http.HTTPFlow):
                 if new_content is not None:
                     flow.response.set_content(new_content)
             except Exception as e:
-                print(f"[proxy] Error anonymizing response: {e}")
-                traceback.print_exc()
+                log.error("Error anonymizing response: %s", e, exc_info=True)
                 # Still send response but log error
             return
 
@@ -282,9 +283,7 @@ async def response(flow: http.HTTPFlow):
                 if new_content is not None:
                     flow.response.set_content(new_content)
             except Exception as e:
-                print(f"[proxy] Error deanonymizing response: {e}")
-                traceback.print_exc()
+                log.error("Error deanonymizing response: %s", e, exc_info=True)
                 # Still send response but log error
     except Exception as e:
-        print(f"[proxy] Unexpected error in response processing: {e}")
-        traceback.print_exc()
+        log.error("Unexpected error in response processing: %s", e, exc_info=True)

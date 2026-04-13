@@ -1,8 +1,11 @@
+import logging
 import time
 from typing import List, Generator
 
 from proxy.mappings import Mappings
 from proxy.entity_finder import AbstractEntityFinder, Entity
+
+log = logging.getLogger(__name__)
 
 
 class MappingsEntityFinder(AbstractEntityFinder):
@@ -31,6 +34,6 @@ class MappingsEntityFinder(AbstractEntityFinder):
                 yield entities
         finally:
             t1 = time.time()
-            print(f"[mappings_finder] the entity finder took {t1 - t0} seconds to process total of {sum(len(text) for text in texts)} chars")
+            log.debug("mappings_finder %.3fs over %d chars", t1 - t0, sum(len(t) for t in texts))
 
         return None

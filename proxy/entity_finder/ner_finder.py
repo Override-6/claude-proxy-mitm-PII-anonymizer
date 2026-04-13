@@ -13,8 +13,12 @@ from typing import List, Generator
 import torch
 from transformers import AutoModelForTokenClassification, AutoTokenizer, pipeline
 
+import logging
+
 from proxy.mappings import Mappings
 from proxy.entity_finder import AbstractEntityFinder, Entity
+
+log = logging.getLogger(__name__)
 
 _MODEL_NAME = "Babelscape/wikineural-multilingual-ner"
 
@@ -37,7 +41,7 @@ _CHUNK_OVERLAP_TOKENS = 50
 class NEREntityFinder(AbstractEntityFinder):
 
     def __init__(self, model_name: str = _MODEL_NAME) -> None:
-        print(f"Loading NER model ({model_name})...")
+        log.info("Loading NER model (%s)...", model_name)
         tokenizer = AutoTokenizer.from_pretrained(model_name, model_max_length=512, truncation=True)
         model = AutoModelForTokenClassification.from_pretrained(model_name)
         self._tokenizer = tokenizer
@@ -49,7 +53,7 @@ class NEREntityFinder(AbstractEntityFinder):
             device=0 if torch.cuda.is_available() else -1,
         )
         self._lock = threading.Lock()
-        print(f"NER model loaded! ({model_name})")
+        log.info("NER model loaded (%s)", model_name)
 
     def _chunk_text(self, text: str) -> list[tuple[str, int]]:
         """
@@ -160,7 +164,7 @@ class NEREntityFinder(AbstractEntityFinder):
                             accumulated[text_idx].append(entity)
         finally:
             t1 = time.time()
-            print(f"[ner] operation took {t1 - t0} seconds for ner over {char_count} chars")
+            log.debug("NER %.3fs over %d chars", t1 - t0, char_count)
 
         for entities in accumulated:
             yield entities

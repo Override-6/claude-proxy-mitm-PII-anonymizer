@@ -193,6 +193,21 @@ async def _apply_paths(proxy: DLPProxy, data: dict, sensitive_fields: list[str] 
 
         updates.append((path_list, redact_entities(value, entities, proxy.mappings)))
 
+    n_hits = sum(1 for c in cached_results if c is not None)
+    n_ner = len(non_cached_indices)
+    total_entities = sum(len(e) for e in entities_list)
+    if n_hits > 0 or total_entities > 0:
+        entity_type_counts: dict[str, int] = {}
+        for ents in entities_list:
+            for e in ents:
+                entity_type_counts[e.type] = entity_type_counts.get(e.type, 0) + 1
+        entity_summary = ", ".join(f"{t}×{n}" for t, n in entity_type_counts.items())
+        log.info(
+            "  paths=%d | cache %d/%d hits | NER %d | entities %d%s",
+            len(paths), n_hits, len(paths), n_ner, total_entities,
+            f" ({entity_summary})" if entity_type_counts else "",
+        )
+
     return set_values(data, updates)
 
 
@@ -242,35 +257,10 @@ async def _anonymize_base64_images(proxy: DLPProxy, data: dict) -> dict:
     return data
 
 
-_REDACTED_RE_BYTES = re.compile(rb'\[[A-Z_]+_\d+\]')
-_REDACTED_RE_STR = re.compile(r'\[[A-Z_]+_\d+\]')
-
-
-def _log_anonymization_diff(raw: bytes, new_content: str) -> None:
-    # Scan for tokens on the raw bytes directly — avoids keeping a separate
-    # re-serialised 'original' string alongside the parsed body dict.
-    orig_tokens = {m.group(0).decode() for m in _REDACTED_RE_BYTES.finditer(raw)}
-    new_tokens = set(_REDACTED_RE_STR.findall(new_content))
-    injected = new_tokens - orig_tokens
-    if len(new_content) == len(raw) and not injected:
-        print(f"[anonymizer] WARNING: body unchanged after anonymization ({len(raw)} bytes)")
-        return
-    if not injected:
-        print("[anonymizer] Body changed (system prompt injected, no new tokens)")
-        return
-    print(f"[anonymizer] Tokens introduced: {injected}")
-    for tok in list(injected)[:10]:
-        idx = new_content.find(tok)
-        print(f"[anonymizer] '{tok}' context: ...{new_content[max(0, idx - 80):idx + len(tok) + 80]}...")
 
 
 async def _apply_rule_json(proxy: DLPProxy, raw: bytes, sensitive_fields: list[str] | bool, url: str) -> bytes:
-    if not raw or not raw.strip():
-        return raw
-    try:
-        body = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw
+    body = json.loads(raw)
     # Do NOT keep a json.dumps(body) 'original' here — for large conversations
     # that extra string is 1× body size in memory alongside the parsed dict
     # (3-5×) and the final new_content (1×), pushing peak to 6-7× body size.
@@ -282,7 +272,6 @@ async def _apply_rule_json(proxy: DLPProxy, raw: bytes, sensitive_fields: list[s
         body = claude_system_prompt.inject(body, url)
 
     new_content = json.dumps(body, ensure_ascii=False)
-    _log_anonymization_diff(raw, new_content)
     return new_content.encode("utf-8", errors="ignore")
 
 
@@ -328,7 +317,7 @@ async def _anonymize_multipart(proxy: DLPProxy, content: bytes, content_type: st
                 anonymized_body, _ = anonymize_image(part_body, proxy)
                 result_parts.append(b'\r\n' + part_headers + b'\r\n\r\n' + anonymized_body + suffix)
             except Exception as e:
-                print(f"[anonymizer] WARNING: image anonymization failed! rethrowing error")
+                log.warning("image anonymization failed, rethrowing")
                 # result_parts.append(raw_part)
                 raise e
         else:
@@ -348,7 +337,7 @@ async def anonymize_message(proxy: DLPProxy, headers: Headers, content: bytes | 
         return None
 
     t0 = time.time()
-    print(f"[anonymizer] Rule matched: {matched_rule.url_pattern.pattern} for {url}")
+    log.info("anonymize: %s", url)
     content_type = headers.get("content-type", "")
 
     if "multipart/form-data" in content_type:
@@ -356,7 +345,7 @@ async def anonymize_message(proxy: DLPProxy, headers: Headers, content: bytes | 
     else:
         content = await _apply_rule_json(proxy, content, matched_rule.sensitive_fields, url)
 
-    print(f"[anonymizer] Done in {time.time() - t0:.3f}s — {url}")
+    log.info("anonymize done in %.3fs: %s", time.time() - t0, url)
 
     return content
 
@@ -398,7 +387,12 @@ async def deanonymize_message(proxy: DLPProxy, content: bytes | None) -> bytes |
         return content
     text = content.decode("utf-8", errors="ignore")
     chars = list(text)
+    tokens: list[str] = []
     for match in reversed(list(REDACTED_REGEX.finditer(text))):
-        sensitive_value = proxy.mappings.get_sensitive_value(match.group(0))
+        redacted = match.group(0)
+        sensitive_value = proxy.mappings.get_sensitive_value(redacted)
+        tokens.append(redacted)
         chars[match.start():match.end()] = list(sensitive_value)
+    if tokens:
+        log.info("deanonymize: %d tokens: %s", len(tokens), ", ".join(tokens))
     return "".join(chars).encode("utf-8", errors="ignore")

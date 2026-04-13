@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from pathlib import Path
@@ -18,6 +19,8 @@ _EXEMPT_RE = re.compile(r'\{\{.*?\}\}', re.DOTALL)
 
 _ANXIOUS_FILTER_WHITELIST = frozenset(["CLAUDE", "CLAUDE CODE", "CLAUDE COWORK", "ANTHROPIC"])
 
+log = logging.getLogger(__name__)
+
 _mappings_finder = MappingsEntityFinder()
 
 
@@ -32,14 +35,13 @@ def anxious_filter(mappings: Mappings, request_body: str) -> Tuple[bool, list[En
 
 
 def trigger_anxious_filter(url: str, flow: http.HTTPFlow, entities: list[Entity]):
-    print("[proxy] Anxious filter triggered!")
-    print(f"[proxy] Request {url} contained {len(entities)} unmasked sensitive entities.")
-    print(f"[proxy] Entities: {set(e.text for e in entities)}")
+    entity_texts = {e.text for e in entities}
+    log.warning("ANXIOUS FILTER: %s — %d unmasked entities: %s", url, len(entities), entity_texts)
     try:
         _IGNORE_DIR.mkdir(parents=True, exist_ok=True)
         dump_path = _IGNORE_DIR / "last_anxious_filter.json"
         with open(dump_path, "w") as f:
             f.write(flow.request.get_content().decode("utf-8", errors="replace"))
-        print(f"[proxy] Full request body saved to {dump_path}")
+        log.debug("Anxious filter dump saved to %s", dump_path)
     except Exception as e:
-        print(f"[proxy] Could not save anxious filter dump: {e}")
+        log.error("Could not save anxious filter dump: %s", e)
