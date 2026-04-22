@@ -1,0 +1,250 @@
+services:
+  headscale:
+    image: headscale/headscale:latest
+    container_name: headscale
+    restart: unless-stopped
+    command: serve
+    ports:
+      - "18080:18080"     # Coordination server (nginx proxies vpn.maxou.dev:443 → 18080)
+      - "3478:3478/udp"   # STUN (embedded DERP server)
+    volumes:
+      - ./docker/headscale.yaml:/etc/headscale/config.yaml:ro
+      - ./data/headscale:/var/lib/headscale
+    networks:
+      - vpn
+
+  tailscale:
+    build:
+      context: .
+      dockerfile: docker/tailscale.dockerfile
+    container_name: tailscale-exit
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      # Allow DNAT to 127.0.0.1 from non-loopback interfaces (tailscale0).
+      # Without this, the kernel drops packets arriving on tailscale0 after
+      # iptables rewrites their destination to 127.x.x.x (mitmproxy).
+      - net.ipv4.conf.all.route_localnet=1
+      # IPv6 forwarding for exit-node clients (no-op if Docker IPv6 is disabled).
+      - net.ipv6.conf.all.forwarding=1
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./data/tailscale:/var/lib/tailscale
+    environment:
+      - MITM_PROXY_PORT=8080
+      - HEADSCALE_URL=${HEADSCALE_URL:-https://vpn.maxou.dev}
+      - TS_HOSTNAME=${TS_HOSTNAME:-tailscale-exit}
+      - TS_AUTHKEY=${TS_AUTHKEY:-}   # set by headscale-setup.sh in .env
+    # Expose mitmproxy's ports through this container (shared network namespace).
+    # Also publish the WireGuard port so inbound UDP always reaches the container
+    # (otherwise Docker only tracks outbound conntrack entries which expire on restart).
+    ports:
+      - "8080:8080"
+      - "8000:8000"
+      - "41641:41641/udp"
+    networks:
+      - proxy
+
+
+  mitm-proxy-explicit:
+    build:
+      context: .
+      dockerfile: docker/proxy.dockerfile
+    profiles:
+      - explicit
+    image: claude-mitm-proxy:latest
+    container_name: claude-mitm-proxy-explicit
+    command: >
+      poetry run mitmdump
+      -s proxy/main.py
+      --mode regular@0.0.0.0:8080
+      --mode reverse:http://mcp-servers:8000@0.0.0.0:8000
+      --set console_eventlog_verbosity=info
+      --set flow_detail=0
+      --set script_reload=false
+    #      - "127.0.0.1:9999:9999" # use `docker compose exec poetry run python console.py` instead !
+    volumes:
+      # Persists mitmproxy CA cert across restarts.
+      # The cert at ./data/mitmproxy-ca-cert.pem must be installed on every
+      # client machine that routes traffic through this proxy.
+      # === CRITICAL: Mount host caches to avoid re-downloading dependencies ===
+      # pip cache (wheels, build artifacts) — shared between host and container
+      - ~/.cache/pip:/root/.cache/pip:delegated
+      # poetry cache — shared between host and container
+      - ~/.cache/pypoetry:/root/.cache/pypoetry:delegated
+      # HuggingFace models — shared between host and container
+      - ~/.cache/huggingface:/root/.cache/huggingface:delegated
+      # EasyOCR models — shared between host and container
+      - ~/.EasyOCR:/root/.EasyOCR:delegated
+
+      # === Application data ===
+      # Persists mitmproxy CA cert across restarts.
+      - ./data/mitmproxy:/root/.mitmproxy
+      # Runtime config — edit without rebuilding
+      - ./assets:/app/assets:ro
+      # Persistent cache and audit log
+      - ./data/cache:/app/cache
+      - ./data/ignore:/app/ignore
+      # Mount source code so code changes take effect without rebuilding the image
+      - ./proxy:/app/proxy
+      # All /app/data output (redacted images, request log, …)
+      - ./data:/app/data
+      # Fine-tuned NER models
+      - ./models:/app/models
+    ports:
+      - "8080:8080"
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=.
+
+
+  mitm-proxy:
+    build:
+      context: .
+      dockerfile: docker/proxy.dockerfile
+    image: claude-mitm-proxy:latest
+    container_name: claude-mitm-proxy
+    restart: unless-stopped
+    # Share tailscale's network namespace so SO_ORIGINAL_DST can see DNAT conntrack entries.
+    # Ports and network are defined on the tailscale service above.
+    # depends_on ensures mitm-proxy is restarted after tailscale (which resets the netns).
+    depends_on:
+      tailscale:
+        condition: service_started
+    network_mode: "service:tailscale"
+    # Dual-mode: transparent proxy on 8080 (VPN traffic via tailscale DNAT) +
+    #            reverse proxy on 8000 (MCP server traffic, deanon/anon)
+    command: >
+      poetry run mitmdump
+      -s proxy/main.py
+      --mode transparent@0.0.0.0:8080
+      --mode reverse:http://mcp-servers:8000@0.0.0.0:8000
+      --set console_eventlog_verbosity=info
+      --set flow_detail=0
+      --set script_reload=false
+    #      - "127.0.0.1:9999:9999" # use `docker compose exec poetry run python console.py` instead !
+    volumes:
+      # Persists mitmproxy CA cert across restarts.
+      # The cert at ./data/mitmproxy-ca-cert.pem must be installed on every
+      # client machine that routes traffic through this proxy.
+      # === CRITICAL: Mount host caches to avoid re-downloading dependencies ===
+      # pip cache (wheels, build artifacts) — shared between host and container
+      - ~/.cache/pip:/root/.cache/pip:delegated
+      # poetry cache — shared between host and container
+      - ~/.cache/pypoetry:/root/.cache/pypoetry:delegated
+      # HuggingFace models — shared between host and container
+      - ~/.cache/huggingface:/root/.cache/huggingface:delegated
+      # EasyOCR models — shared between host and container
+      - ~/.EasyOCR:/root/.EasyOCR:delegated
+
+      # === Application data ===
+      # Persists mitmproxy CA cert across restarts.
+      - ./data/mitmproxy:/root/.mitmproxy
+      # Runtime config — edit without rebuilding
+      - ./assets:/app/assets:ro
+      # Persistent cache and audit log
+      - ./data/cache:/app/cache
+      - ./data/ignore:/app/ignore
+      # Mount source code so code changes take effect without rebuilding the image
+      - ./proxy:/app/proxy
+      # All /app/data output (redacted images, request log, …)
+      - ./data:/app/data
+      # Fine-tuned NER models
+      - ./models:/app/models
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=.
+
+      #  validator:
+      #    build:
+      #      context: .
+      #      dockerfile: docker/validator.dockerfile
+      #      args:
+      #        HF_TOKEN: ${HF_TOKEN}
+      #    container_name: claude-validator
+      #    restart: unless-stopped
+      # Validator runs as a scheduled service inside the container
+      # No host cron — everything is containerized
+      #    command: poetry run python validator/main.py --daemon
+      #    volumes:
+      # === CRITICAL: Mount host caches to avoid re-downloading dependencies ===
+      #      - ~/.cache/pip:/root/.cache/pip:delegated
+      #      - ~/.cache/pypoetry:/root/.cache/pypoetry:delegated
+      # Note: HuggingFace models are baked into the image at /app/hf_cache —
+      # we do NOT mount ~/.cache/huggingface here to avoid shadowing them.
+
+      # === Application data ===
+      # Shared entity cache (proxy writes, validator reads)
+      #- ./data/requests-entities.jsonl:/app/data/requests-entities.jsonl:ro
+      # Shared request log (read-only)
+      #- ./data/requests-sample.jsonl:/app/data/requests-sample.jsonl:ro
+      # Output: collected disagreements + training data
+      # App data
+      #      - ./data:/app/data
+      # Fine-tuned models
+      #      - ./models:/app/models
+      # source code
+      #      - ./validator:/app/validator:ro
+      #      - ./proxy:/app/proxy:ro
+      #      - ./scripts:/app/scripts:ro
+      #    environment:
+      #      - PYTHONUNBUFFERED=1
+      #      - PYTHONPATH=.
+      # HF_HOME points to the baked-in model cache (set at build time in Dockerfile)
+      #      - HF_HOME=/app/hf_cache
+      # Prevent any runtime network calls to HuggingFace — model is baked into image
+      #      - TRANSFORMERS_OFFLINE=1
+      #      - HF_DATASETS_OFFLINE=1
+      # Schedule: run every Saturday at midnight
+  #      - VALIDATOR_SCHEDULE_ENABLED=true
+  #      - VALIDATOR_SCHEDULE_DAY=sat
+  #      - VALIDATOR_SCHEDULE_HOUR=0
+  #      - VALIDATOR_SCHEDULE_MINUTE=0
+  #      - VALIDATOR_REQUEST_LIMIT=5000
+  #    depends_on:
+  #      - mitm-proxy
+
+  mcp-servers:
+    image: nginx:latest
+    restart: unless-stopped
+    volumes:
+      - ./mcp.conf:/etc/nginx/conf.d/mcp.conf
+    networks:
+      - mcp
+      - proxy
+
+  google-workspace-mcp:
+    build:
+      context: .
+      dockerfile: docker/gw-mcp.dockerfile
+    image: claude-pii-proxy-google-workspace-mcp:latest
+    container_name: google-workspace-mcp
+    restart: unless-stopped
+    networks:
+      - mcp
+    volumes:
+      # Persists OAuth tokens across container restarts.
+      - ./data/google-workspace-mcp:/app/tokens
+    environment:
+      - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}
+      - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET}
+      # Must match exactly what you registered in Google Cloud Console.
+      - GOOGLE_OAUTH_REDIRECT_URI=https://mcp.maxou.dev/google/oauth2callback
+      # Required when running OAuth over plain HTTP (local dev / Docker).
+      - OAUTHLIB_INSECURE_TRANSPORT=1
+      - PYTHONUNBUFFERED=1
+
+
+
+networks:
+  mcp:
+    driver: bridge
+  proxy:
+    driver: bridge
+  vpn:
+    driver: bridge

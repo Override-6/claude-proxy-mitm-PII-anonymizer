@@ -1,0 +1,10 @@
+.claude
+.idea
+ignore
+cache/
+data/
+**/__pycache__
+
+models/
+
+.env

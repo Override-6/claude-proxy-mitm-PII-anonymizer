@@ -1,0 +1,19 @@
+# Prevent source code changes from invalidating dependency layer cache
+proxy/
+validator/
+tests/
+scripts/
+data/
+models/
+.git/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.env
+.env.local
+README.md
+CLAUDE.md
+LICENSE

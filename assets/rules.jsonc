@@ -1,0 +1,397 @@
+{
+  "anxious_filter_domains": [
+    ".*"
+  ],
+  // URLs on intercepted hosts (claude.ai, api/a-api.anthropic.com, …) that
+  // carry no user PII and can be forwarded as-is. The request hook enforces a
+  // default-deny: any intercepted URL that matches NEITHER an anonymise/
+  // deanonymise rule NOR one of these patterns gets blocked with 403.
+  // Add a new entry whenever a legitimate-but-unknown endpoint is blocked.
+  "known_safe_routes": [
+    // ---- Static assets & app shell (claude.ai) --------------------------
+    "https://claude\\.ai/_next/.*",
+    "https://claude\\.ai/favicon.*",
+    "https://claude\\.ai/manifest\\.json",
+    "https://claude\\.ai/robots\\.txt",
+    "https://claude\\.ai/images/.*",
+    "https://claude\\.ai/fonts/.*",
+    "https://claude\\.ai/icons/.*",
+    "https://claude\\.ai/assets/.*",
+    "https://claude\\.ai/sw\\.js",
+    "https://claude\\.ai/",
+    "https://claude\\.ai/chat.*",
+    "https://claude\\.ai/new.*",
+    "https://claude\\.ai/projects.*",
+    "https://claude\\.ai/settings.*",
+    "https://claude\\.ai/recents.*",
+
+    // ---- Auth / OAuth / sessions ---------------------------------------
+    "https://claude\\.ai/api/auth/.*",
+    "https://claude\\.ai/api/oauth/.*",
+    "https://claude\\.ai/login.*",
+    "https://claude\\.ai/logout.*",
+    "https://claude\\.ai/api/bootstrap.*",
+    "https://claude\\.ai/api/session.*",
+    "https://(api|a-api)\\.anthropic\\.com/v1/oauth/.*",
+    "https://(api|a-api)\\.anthropic\\.com/api/auth/.*",
+
+    // ---- Metadata / listings that carry no free-form user text ---------
+    "https://claude\\.ai/api/organizations",
+    "https://claude\\.ai/api/organizations/[^/]+/usage.*",
+    "https://claude\\.ai/api/organizations/[^/]+/rate_limit.*",
+    "https://claude\\.ai/api/organizations/[^/]+/members.*",
+    "https://claude\\.ai/api/organizations/[^/]+/memberships.*",
+    "https://claude\\.ai/api/organizations/[^/]+/invites.*",
+    "https://claude\\.ai/api/organizations/[^/]+/features.*",
+    "https://claude\\.ai/api/organizations/[^/]+/flags.*",
+    "https://claude\\.ai/api/organizations/[^/]+/limits.*",
+    "https://claude\\.ai/api/organizations/[^/]+/subscriptions.*",
+    "https://claude\\.ai/api/organizations/[^/]+/billing.*",
+    "https://claude\\.ai/api/organizations/[^/]+/mcp/servers",
+    "https://claude\\.ai/api/organizations/[^/]+/mcp/servers/[^/]+",
+    "https://claude\\.ai/api/organizations/[^/]+/mcp/servers/[^/]+/(tools|resources|prompts)",
+    "https://claude\\.ai/api/organizations/[^/]+/skills.*",
+    "https://claude\\.ai/api/organizations/[^/]+/styles.*",
+    "https://claude\\.ai/api/organizations/[^/]+/integrations.*",
+    "https://claude\\.ai/api/organizations/[^/]+/artifacts.*",
+    "https://claude\\.ai/api/models.*",
+    "https://claude\\.ai/api/features.*",
+    "https://claude\\.ai/api/flags.*",
+
+    // ---- File download (we don't touch bytes, client consumes as-is) ---
+    "https://claude\\.ai/api/organizations/[^/]+/files/[^/]+/(preview|thumbnail|download)",
+
+    // ---- Anthropic API — metadata / listings ---------------------------
+    "https://(api|a-api)\\.anthropic\\.com/v1/models.*",
+    "https://(api|a-api)\\.anthropic\\.com/v1/organizations",
+    "https://(api|a-api)\\.anthropic\\.com/v1/organizations/usage.*",
+    "https://(api|a-api)\\.anthropic\\.com/v1/organizations/cost_report.*",
+    "https://(api|a-api)\\.anthropic\\.com/v1/organizations/workspaces",
+    "https://(api|a-api)\\.anthropic\\.com/v1/organizations/api_keys",
+    "https://(api|a-api)\\.anthropic\\.com/v1/messages/batches/[^/]+",
+    "https://(api|a-api)\\.anthropic\\.com/v1/files/[^/]+(/content)?",
+    "https://(api|a-api)\\.anthropic\\.com/v1/skills",
+    "https://(api|a-api)\\.anthropic\\.com/v1/skills/[^/]+",
+
+    // ---- WebSocket / streaming session init (no body) ------------------
+    "wss://claude\\.ai/api/.*"
+  ],
+  "blocked_urls": [
+    // claude.ai — MCP tool calls (must use local MCP servers instead)
+    {
+      "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/mcp/servers/[^/]+/tools/call"
+    },
+    // claude.ai metrics
+    {
+      "url_pattern": "https://api\\.anthropic\\.com/api/event_logging/.*"
+    },
+    // claude.ai metrics
+    {
+      "url_pattern": "https://statsig\\.anthropic\\.com/.*"
+    },
+    // claude.ai — remote integrations bridge (server-side tool execution, e.g. Gmail, Google Drive)
+    {
+      "url_pattern": "https://bridge\\.claudeusercontent\\.com/.*"
+    },
+    // datadog metrics
+    {
+      "url_pattern": "https://.*\\.datadoghq\\.com/.*"
+    },
+    // sentry (error logging and telemetry management)
+    {
+      "url_pattern": "https://sentry\\.io/.*"
+    }
+  ],
+  "anonymise": {
+    "requests": [
+      // Messages API — create & count_tokens (api + a-api, v1)
+      // NOTE: .messages[].content[] with select(.type != "thinking") excludes thinking blocks —
+      //       their `signature` field must never be modified (cryptographic, API-validated) and
+      //       their `thinking` field is always empty on replay (by Anthropic API design).
+      {
+        "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/messages(/count_tokens)?",
+        "sensitive_fields": [
+          ".system[1:][].text",
+          ".messages[].content[] | select(.type != \"thinking\") | .. | strings",
+          ".tools[].description",
+          ".tools[].input_schema | .. | objects | select(.description != null) | .description | strings"
+        ]
+      },
+      // Messages Batches API (api + a-api, v1)
+      {
+        "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/messages/batches",
+        "sensitive_fields": [
+          ".system[1:][].text",
+          ".requests[].custom_id",
+          ".requests[].params.messages[].content[] | select(.type != \"thinking\") | .. | strings",
+          ".requests[].params.messages[].content | select(.type != \"thinking\") | .. | strings"
+        ]
+      },
+      // Legacy Completions API (api + a-api, v1)
+      {
+        "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/complete",
+        "sensitive_fields": [
+          ".system[1:][].text",
+          ".prompt"
+        ]
+      },
+      // Files API upload — multipart (api + a-api, v1)
+      {
+        "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/files",
+        "sensitive_fields": true
+      },
+      // Skills API — create & update versions (api + a-api, v1)
+      {
+        "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/skills(/[^/]+/versions)?",
+        "sensitive_fields": true
+      },
+      // Admin — invite member (api + a-api, v1)
+      {
+        "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/organizations/invites",
+        "sensitive_fields": [
+          ".email"
+        ]
+      },
+      // Admin — create/update workspace (api + a-api, v1)
+      {
+        "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/organizations/workspaces(/[^/]+)?",
+        "sensitive_fields": [
+          ".name",
+          ".description"
+        ]
+      },
+      // Admin — rename API key (api + a-api, v1)
+      {
+        "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/organizations/api_keys/[^/]+",
+        "sensitive_fields": [
+          ".name"
+        ]
+      },
+      // claude.ai — MCP tool call inputs
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/mcp/servers/[^/]+/tools/call",
+        "sensitive_fields": [
+          ".arguments"
+        ]
+      },
+      // claude.ai — chat completion / retry / continue
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/chat_conversations/[^/]+/(completion|retry_completion|continue|retry)",
+        "sensitive_fields": [
+          ".prompt",
+          ".system[1:][].text",
+          ".attachments[].extracted_content",
+          ".attachments[].file_name"
+        ]
+      },
+      // claude.ai — session title generation
+      {
+        "url_pattern": "https://claude\\.ai/api/.*/(generate_session_)?title",
+        "sensitive_fields": [
+          ".first_session_message",
+          ".message_content"
+        ]
+      },
+      // claude.ai — session title generation (explicit path)
+      {
+        "url_pattern": "https://claude\\.ai/api/.*/generate_session_title",
+        "sensitive_fields": [
+          ".first_session_message"
+        ]
+      },
+      // claude.ai — create or update chat conversation
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/chat_conversations(/[^/]+)?",
+        "sensitive_fields": [
+          ".name",
+          ".title",
+          ".summary"
+        ]
+      },
+      // claude.ai — rename chat (legacy)
+      {
+        "url_pattern": "https://claude\\.ai/api/rename_chat",
+        "sensitive_fields": [
+          ".title"
+        ]
+      },
+      // claude.ai — append message (legacy)
+      {
+        "url_pattern": "https://claude\\.ai/api/append_message",
+        "sensitive_fields": [
+          ".text",
+          ".system[1:][].text",
+          ".attachments[].extracted_content",
+          ".attachments[].file_name",
+          ".completion.prompt"
+        ]
+      },
+      // claude.ai — conversation feedback
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/chat_conversations/[^/]+/feedback",
+        "sensitive_fields": [
+          ".comment"
+        ]
+      },
+      // claude.ai — any file upload or document conversion endpoint (multipart), at any path depth
+      {
+        "url_pattern": "https://claude\\.ai/api/.+/(upload(-file)?|convert_document)",
+        "sensitive_fields": true
+      },
+      // claude.ai — account / profile updates
+      {
+        "url_pattern": "https://claude\\.ai/api/(organizations/[^/]+/)?(account|settings|profile)",
+        "sensitive_fields": [
+          ".name",
+          ".full_name",
+          ".email",
+          ".display_name"
+        ]
+      },
+      // claude.ai — project prompt templates, knowledge, and docs
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/projects/[^/]+/(prompt_templates|docs|knowledge|prompt)",
+        "sensitive_fields": [
+          ".title",
+          ".content",
+          ".prompt"
+        ]
+      },
+      // claude.ai — create/update project
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/projects(/[^/]+)?",
+        "sensitive_fields": [
+          ".name",
+          ".description"
+        ]
+      },
+      // claude.ai — search conversations
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/chat_conversations/search",
+        "sensitive_fields": [
+          ".query"
+        ]
+      }
+    ],
+    "responses": [
+      // google_workspace_mcp reverse proxy — deanon args from Claude, re-anon tool results back to Claude
+      // sensitive_fields:true covers every string in the body
+      {
+        "url_pattern": "http://[^/]+:8000/.*",
+        "sensitive_fields": true
+      }
+    ]
+  },
+  "deanonymise": {
+    "responses": [
+      // Messages API response (api + a-api, v1) — non-streaming + SSE
+      // NOTE: .content[].thinking excluded — thinking blocks have strict signature validation
+      {
+        "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/messages",
+        "sensitive_fields": [
+          ".content[].text",
+          ".content[].input"
+        ],
+        "sse_fields": [
+          ".delta.text",
+          ".delta.partial_json",
+          ".content_block.text"
+        ]
+      },
+      // Legacy Completions API response (api i+ a-api, v1) — non-streaming + SSE
+      {
+        "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/complete",
+        "sensitive_fields": [
+          ".completion"
+        ],
+        "sse_fields": [
+          ".completion"
+        ]
+      },
+      // Batch results — each result contains a message response
+      // NOTE: .result.message.content[].thinking excluded — thinking blocks have strict signature validation
+      {
+        "url_pattern": "https://(api|a-api)\\.anthropic\\.com/v1/messages/batches/[^/]+/results",
+        "sensitive_fields": [
+          ".result.message.content[].text",
+          ".result.message.content[].input"
+        ]
+      },
+      // claude.ai — chat completion response (non-streaming + SSE)
+      // NOTE: .content[].thinking excluded — thinking blocks have strict signature validation
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/chat_conversations/[^/]+/(completion|retry_completion|continue|retry)",
+        "sensitive_fields": [
+          ".completion",
+          ".text",
+          ".content[].text"
+        ],
+        "sse_fields": [
+          ".completion",
+          ".delta.text",
+          ".delta.partial_json",
+          ".content_block.text"
+        ]
+      },
+      // claude.ai — single conversation retrieval (messages, title, etc.)
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/chat_conversations/[^/]+",
+        "sensitive_fields": [
+          ".name",
+          ".title",
+          ".summary",
+          ".chat_messages[].text",
+          ".chat_messages[].content[].text",
+          ".chat_messages[].attachments[].extracted_content",
+          ".chat_messages[].attachments[].file_name"
+        ]
+      },
+      // claude.ai — conversation list
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/chat_conversations",
+        "sensitive_fields": [
+          ".[].name",
+          ".[].title",
+          ".[].summary"
+        ]
+      },
+      // claude.ai — search results
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/chat_conversations/search",
+        "sensitive_fields": [
+          ".[].name",
+          ".[].title",
+          ".[].summary",
+          ".[].chat_messages[].text"
+        ]
+      },
+      // claude.ai — account / profile retrieval
+      {
+        "url_pattern": "https://claude\\.ai/api/(organizations/[^/]+/)?(account|settings|profile)",
+        "sensitive_fields": [
+          ".name",
+          ".full_name",
+          ".email",
+          ".display_name"
+        ]
+      },
+      // claude.ai — project details
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/projects/[^/]+",
+        "sensitive_fields": [
+          ".name",
+          ".description"
+        ]
+      },
+      // claude.ai — project knowledge / docs listing
+      {
+        "url_pattern": "https://claude\\.ai/api/organizations/[^/]+/projects/[^/]+/(prompt_templates|docs|knowledge)",
+        "sensitive_fields": [
+          ".[].title",
+          ".[].content",
+          ".[].prompt"
+        ]
+      }
+    ]
+  }
+}
